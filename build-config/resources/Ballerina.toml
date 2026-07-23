@@ -1,0 +1,122 @@
+[package]
+distribution = "2201.12.0"
+org = "ballerinax"
+name = "ai.azure.storage.files"
+version = "@toml.version@"
+license = ["Apache-2.0"]
+icon = "icon.png"
+authors = ["Ballerina"]
+keywords = ["Vendor/Microsoft", "Area/AI & Machine Learning", "Type/Data Loader", "azure", "file", "storage"]
+repository = "https://github.com/ballerina-platform/module-ballerinax-ai.azure.storage.files"
+
+[platform.java21]
+graalvmCompatible = true
+
+# Native text extractor (Apache Tika) for this package.
+[[platform.java21.dependency]]
+groupId = "io.ballerina.lib"
+artifactId = "ai.azure.storage.files-native"
+version = "@toml.version@"
+path = "../native/build/libs/ai.azure.storage.files-native-@project.version@.jar"
+
+# Apache Tika core + PDF parser module (PDFBox) + Microsoft Office parser module (POI).
+# `AutoDetectParser` routes each file to the matching module (see `TextExtractor` / `classify`).
+[[platform.java21.dependency]]
+groupId = "org.apache.tika"
+artifactId = "tika-core"
+version = "@tikaVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.tika"
+artifactId = "tika-parser-pdf-module"
+version = "@tikaVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.tika"
+artifactId = "tika-parser-microsoft-module"
+version = "@tikaVersion@"
+
+# Tika ZIP/container detection — required so OOXML (.docx/.pptx/.xlsx) files are detected.
+[[platform.java21.dependency]]
+groupId = "org.apache.tika"
+artifactId = "tika-parser-zip-commons"
+version = "@tikaVersion@"
+
+# Apache PDFBox (PDF parsing, used by the Tika PDF module).
+[[platform.java21.dependency]]
+groupId = "org.apache.pdfbox"
+artifactId = "pdfbox"
+version = "@pdfboxVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.pdfbox"
+artifactId = "pdfbox-io"
+version = "@pdfboxIoVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.pdfbox"
+artifactId = "fontbox"
+version = "@pdfboxVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.pdfbox"
+artifactId = "jempbox"
+version = "@jempboxVersion@"
+
+# Commons IO, required by Tika/PDFBox.
+[[platform.java21.dependency]]
+groupId = "commons-io"
+artifactId = "commons-io"
+version = "@commonsIoVersion@"
+
+# Apache POI (Microsoft Office parsing, used by the Tika microsoft module) and its
+# runtime dependencies. Versions match those bundled by the ballerina/ai module.
+[[platform.java21.dependency]]
+groupId = "org.apache.poi"
+artifactId = "poi"
+version = "@poiVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.poi"
+artifactId = "poi-ooxml"
+version = "@poiVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.poi"
+artifactId = "poi-ooxml-lite"
+version = "@poiVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.poi"
+artifactId = "poi-scratchpad"
+version = "@poiVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.xmlbeans"
+artifactId = "xmlbeans"
+version = "@xmlbeansVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.commons"
+artifactId = "commons-collections4"
+version = "@commonsCollections4Version@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.commons"
+artifactId = "commons-compress"
+version = "@commonsCompressVersion@"
+
+[[platform.java21.dependency]]
+groupId = "com.zaxxer"
+artifactId = "SparseBitSet"
+version = "@sparseBitSetVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.logging.log4j"
+artifactId = "log4j-api"
+version = "@log4jVersion@"
+
+[[platform.java21.dependency]]
+groupId = "org.apache.logging.log4j"
+artifactId = "log4j-core"
+version = "@log4jVersion@"
