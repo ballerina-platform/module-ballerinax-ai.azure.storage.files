@@ -74,49 +74,49 @@ version = "2.20.0"
 [[platform.java21.dependency]]
 groupId = "org.apache.poi"
 artifactId = "poi"
-version = "@poiVersion@"
+version = "5.4.1"
 
 [[platform.java21.dependency]]
 groupId = "org.apache.poi"
 artifactId = "poi-ooxml"
-version = "@poiVersion@"
+version = "5.4.1"
 
 [[platform.java21.dependency]]
 groupId = "org.apache.poi"
 artifactId = "poi-ooxml-lite"
-version = "@poiVersion@"
+version = "5.4.1"
 
 [[platform.java21.dependency]]
 groupId = "org.apache.poi"
 artifactId = "poi-scratchpad"
-version = "@poiVersion@"
+version = "5.4.1"
 
 [[platform.java21.dependency]]
 groupId = "org.apache.xmlbeans"
 artifactId = "xmlbeans"
-version = "@xmlbeansVersion@"
+version = "5.3.0"
 
 [[platform.java21.dependency]]
 groupId = "org.apache.commons"
 artifactId = "commons-collections4"
-version = "@commonsCollections4Version@"
+version = "4.4"
 
 [[platform.java21.dependency]]
 groupId = "org.apache.commons"
 artifactId = "commons-compress"
-version = "@commonsCompressVersion@"
+version = "1.28.0"
 
 [[platform.java21.dependency]]
 groupId = "com.zaxxer"
 artifactId = "SparseBitSet"
-version = "@sparseBitSetVersion@"
+version = "1.3"
 
 [[platform.java21.dependency]]
 groupId = "org.apache.logging.log4j"
 artifactId = "log4j-api"
-version = "@log4jVersion@"
+version = "2.25.4"
 
 [[platform.java21.dependency]]
 groupId = "org.apache.logging.log4j"
 artifactId = "log4j-core"
-version = "@log4jVersion@"
+version = "2.25.4"
