@@ -61,6 +61,12 @@ task updateTomlFiles {
         newBallerinaToml = newBallerinaToml.replace("@pdfboxIoVersion@", project.pdfboxIoVersion)
         newBallerinaToml = newBallerinaToml.replace("@jempboxVersion@", project.jempboxVersion)
         newBallerinaToml = newBallerinaToml.replace("@commonsIoVersion@", project.commonsIoVersion)
+        newBallerinaToml = newBallerinaToml.replace("@poiVersion@", project.poiVersion)
+        newBallerinaToml = newBallerinaToml.replace("@xmlbeansVersion@", project.xmlbeansVersion)
+        newBallerinaToml = newBallerinaToml.replace("@commonsCollections4Version@", project.commonsCollections4Version)
+        newBallerinaToml = newBallerinaToml.replace("@commonsCompressVersion@", project.commonsCompressVersion)
+        newBallerinaToml = newBallerinaToml.replace("@sparseBitSetVersion@", project.sparseBitSetVersion)
+        newBallerinaToml = newBallerinaToml.replace("@log4jVersion@", project.log4jVersion)
         ballerinaTomlFile.text = newBallerinaToml
     }
 }
