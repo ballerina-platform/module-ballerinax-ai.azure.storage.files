@@ -435,7 +435,7 @@ dependencies = [
 [[package]]
 org = "ballerinax"
 name = "ai.azure.storage.files"
-version = "1.0.0"
+version = "0.9.0"
 dependencies = [
 	{org = "ballerina", name = "ai"},
 	{org = "ballerina", name = "io"},
