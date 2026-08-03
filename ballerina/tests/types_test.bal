@@ -55,7 +55,6 @@ isolated function testFileEntryDefaults() {
     test:assertEquals(entry.name, "q1.pdf");
     test:assertEquals(entry.directoryPath, "reports");
     test:assertTrue(entry.contentLength is (), "Optional metadata defaults to ()");
-    test:assertTrue(entry.lastModified is ());
 }
 
 @test:Config {}
@@ -63,4 +62,18 @@ isolated function testFileEntryAtShareRoot() {
     FileEntry entry = {name: "readme.txt", directoryPath: "", contentLength: 42};
     test:assertEquals(entry.directoryPath, "", "A file at the share root has an empty directoryPath");
     test:assertEquals(entry.contentLength, <decimal>42);
+}
+
+@test:Config {}
+isolated function testSourceMaxFileSizeDefault() {
+    // Every file is buffered whole in memory before extraction, so the default bound is what
+    // stops one oversized file in a share from exhausting the heap.
+    Source src = {share: "documents"};
+    test:assertEquals(src.maxFileSizeInBytes, <decimal>104857600, "Defaults to 100 MiB");
+}
+
+@test:Config {}
+isolated function testSourceMaxFileSizeIsConfigurable() {
+    Source src = {share: "documents", maxFileSizeInBytes: 1024};
+    test:assertEquals(src.maxFileSizeInBytes, <decimal>1024);
 }

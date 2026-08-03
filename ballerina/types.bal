@@ -33,6 +33,14 @@ public type Source record {|
     # Case-insensitive extension allowlist for directory listings.
     # Defaults to `()`, all types.
     string[]? includeExtensions = ();
+    # The largest file, in bytes, that will be downloaded and converted. A listed file whose
+    # reported size exceeds this is skipped with a warning instead of being fetched.
+    #
+    # Every file is read fully into memory before its text is extracted, and Azure Files
+    # allows files up to 4 TiB, so this bound is what keeps one oversized file in a share
+    # from exhausting the heap. Defaults to 100 MiB, comfortably above any document worth
+    # embedding. A file named explicitly in `paths` is subject to the same limit.
+    decimal maxFileSizeInBytes = 104857600;
 |};
 
 # Existing Azure Files connector clients, supplied in place of a `files:ConnectionConfig`
@@ -52,11 +60,14 @@ public type Clients record {|
 |};
 
 // A normalized listing entry, decoupled from the connector's `File` record (whose
-// `Properties` are an optional `PropertiesFileItem|EMPTY_STRING`). The loader 
-// reads the connector's file metadata into this shape before building an `ai:TextDocument`.
+// `Properties` are an optional `PropertiesFileItem|EMPTY_STRING`). The loader reads the
+// connector's file metadata into this shape before building an `ai:TextDocument`.
+//
 // Azure Files' file listing (`getFileList`) surfaces the name and `Content-Length` only —
-// no content type and no per-file timestamp — so `contentType` is dropped (classification
-// falls back to the extension) and `lastModified` is present but generally unpopulated. The `directoryPath` is the path to the file's parent directory, relative to the share root
+// no content type and no per-file timestamp — so classification falls back to the file
+// extension, and `mimeType`/`createdAt`/`modifiedAt` are left unset on the document. Both
+// are obtainable from `Get File Properties`, but the connector discards response headers;
+// see the limitations section of the module README.
 
 # A single file discovered while listing a share directory.
 type FileEntry record {|
@@ -67,7 +78,4 @@ type FileEntry record {|
     string directoryPath;
     # The file's size in bytes, if reported (`Content-Length`).
     decimal? contentLength = ();
-    # The file's last-modified timestamp (ISO 8601), if reported. Azure Files' file
-    # listing does not currently surface this, so it is typically `()`.
-    string? lastModified = ();
 |};

@@ -131,7 +131,7 @@ isolated function testExtractTextFromScannedPdfErrors() {
     // a descriptive error rather than silently returning an empty string.
     string|error text = extractText(SCANNED_PDF_BYTES, "scan.pdf");
     if text is error {
-        test:assertTrue(text.message().includes(TEXTLESS_PDF_SENTINEL), text.message());
+        test:assertTrue(text.message().includes(NO_EXTRACTABLE_TEXT_SENTINEL), text.message());
     } else {
         test:assertFail("A scanned (image-only) PDF should surface a descriptive error");
     }
@@ -142,7 +142,7 @@ isolated function testExtractTextFromBlankPdfErrors() {
     // A genuinely blank PDF (no text, no images) gets the same neutral message.
     string|error text = extractText(BLANK_PDF_BYTES, "blank.pdf");
     if text is error {
-        test:assertTrue(text.message().includes(TEXTLESS_PDF_SENTINEL), text.message());
+        test:assertTrue(text.message().includes(NO_EXTRACTABLE_TEXT_SENTINEL), text.message());
     } else {
         test:assertFail("A blank PDF should surface a descriptive error");
     }
@@ -153,17 +153,18 @@ isolated function testBuildDocumentScannedPdfErrors() {
     ai:TextDocument?|ai:Error result = buildDocument(SCANNED_PDF_BYTES, "scan.pdf",
             "application/pdf", (), (), ());
     if result is ai:Error {
-        test:assertTrue(result.message().includes(TEXTLESS_PDF_SENTINEL), result.message());
-        test:assertTrue(isTextlessPdfError(result), "The error must be recognisable as text-less PDF");
+        test:assertTrue(result.message().includes(NO_EXTRACTABLE_TEXT_SENTINEL), result.message());
+        test:assertTrue(isNoExtractableTextError(result),
+                "The error must be recognisable as a document with no extractable text");
     } else {
         test:assertFail("Building a document from a scanned PDF should error, not skip or succeed");
     }
 }
 
 @test:Config {}
-isolated function testIsTextlessPdfErrorRejectsOtherErrors() {
-    test:assertFalse(isTextlessPdfError(error("some unrelated extraction failure")));
-    test:assertFalse(isTextlessPdfError(error("Failed to decode text content")));
+isolated function testIsNoExtractableTextErrorRejectsOtherErrors() {
+    test:assertFalse(isNoExtractableTextError(error("some unrelated extraction failure")));
+    test:assertFalse(isNoExtractableTextError(error("Failed to decode text content")));
 }
 
 @test:Config {}
@@ -241,14 +242,73 @@ isolated function testBuildDocumentDropsUnparseableTimestamp() returns error? {
 
 @test:Config {}
 isolated function testBuildDocumentInvalidUtf8Errors() {
-    // 0xFF is not a valid UTF-8 start byte, so decoding a "text" blob fails.
+    // FF FE opens like a UTF-16LE BOM, but the single trailing byte cannot be a UTF-16 code
+    // unit, so the content is not text in any accepted encoding and must not be decoded
+    // leniently into replacement characters.
     byte[] invalid = [255, 254, 253];
     ai:TextDocument?|ai:Error result = buildDocument(invalid, "broken.txt", "text/plain", (), (), ());
     if result is ai:Error {
         test:assertTrue(result.message().includes("Failed to decode text"), result.message());
     } else {
-        test:assertFail("Invalid UTF-8 text content should surface as an error");
+        test:assertFail("Content that is not text in any accepted encoding should surface as an error");
     }
+}
+
+@test:Config {}
+isolated function testBuildDocumentBinaryWithTextExtensionErrors() {
+    // A binary blob that does not open with a BOM and is not valid UTF-8 or UTF-16.
+    byte[] binary = [255, 216, 255, 224, 0, 16, 74, 70, 73, 70];
+    ai:TextDocument?|ai:Error result = buildDocument(binary, "image.txt", "text/plain", (), (), ());
+    if result is ai:Error {
+        test:assertTrue(result.message().includes("Failed to decode text"), result.message());
+    } else {
+        test:assertFail("Binary content behind a .txt extension should surface as an error");
+    }
+}
+
+// ---- decodeText: encodings that occur on an SMB share -------------------------
+
+@test:Config {}
+isolated function testDecodeTextPlainUtf8() returns error? {
+    string text = check decodeText("hello".toBytes());
+    test:assertEquals(text, "hello");
+}
+
+@test:Config {}
+isolated function testDecodeTextStripsUtf8Bom() returns error? {
+    // A UTF-8 BOM must not survive into the content: it would head the first chunk and be
+    // embedded along with it.
+    byte[] withBom = [239, 187, 191];
+    withBom.push(..."hello".toBytes());
+    string text = check decodeText(withBom);
+    test:assertEquals(text, "hello", "The U+FEFF byte-order mark must be stripped");
+}
+
+@test:Config {}
+isolated function testDecodeTextUtf16LeWithBom() returns error? {
+    // "hi" as UTF-16LE with its BOM — the shape Windows Notepad writes.
+    byte[] utf16le = [255, 254, 104, 0, 105, 0];
+    string text = check decodeText(utf16le);
+    test:assertEquals(text, "hi");
+}
+
+@test:Config {}
+isolated function testDecodeTextUtf16BeWithBom() returns error? {
+    byte[] utf16be = [254, 255, 0, 104, 0, 105];
+    string text = check decodeText(utf16be);
+    test:assertEquals(text, "hi");
+}
+
+@test:Config {}
+isolated function testDecodeTextBomlessUtf16LeFromNulPattern() returns error? {
+    // No BOM, but every second byte is NUL — the signature of ASCII-range UTF-16LE text.
+    byte[] bomless = [];
+    foreach string:Char c in "hello world, this is plain text" {
+        bomless.push(...c.toBytes());
+        bomless.push(0);
+    }
+    string text = check decodeText(bomless);
+    test:assertEquals(text, "hello world, this is plain text");
 }
 
 // ---- buildDocument: PDF (extractable) path -----------------------------------

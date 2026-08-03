@@ -16,6 +16,7 @@
 
 import ballerina/ai;
 import ballerina/jballerina.java;
+import ballerina/lang.regexp;
 import ballerina/time;
 
 // How a file's content is turned into text, derived from its MIME type / extension.
@@ -52,7 +53,9 @@ isolated function buildDocument(byte[] content, string fileName, string? mimeTyp
 
     match classify(fileName, mimeType) {
         PLAIN_TEXT => {
-            string|error text = string:fromBytes(content);
+            // Not `string:fromBytes`: that accepts strict UTF-8 only, while an SMB share
+            // routinely holds UTF-16LE and UTF-8-with-BOM text written by Windows tooling.
+            string|error text = decodeText(content);
             if text is error {
                 return error ai:Error(
                     string `Failed to decode text content of '${fileName}': ${text.message()}`, text);
@@ -71,25 +74,34 @@ isolated function buildDocument(byte[] content, string fileName, string? mimeTyp
     return ();
 }
 
-// Extracts plain text from a PDF document using Apache Tika, reading directly from the
-// in-memory bytes (no temporary file). `fileName` is passed as a Tika resource-name hint.
-// Returns an `error` if the content cannot be parsed.
+// Extracts plain text from a PDF or Microsoft Office document using Apache Tika, reading
+// directly from the in-memory bytes (no temporary file). `fileName` is passed as a Tika
+// resource-name hint and selects the parser. Returns an `error` if the content cannot be
+// parsed, is password-protected, or yields no text at all.
 isolated function extractText(byte[] content, string fileName) returns string|error = @java:Method {
     'class: "io.ballerina.lib.ai.azure.storage.files.TextExtractor",
     name: "extractText"
 } external;
 
-// The sentinel phrase the native extractor embeds when a PDF parses successfully but
-// yields no text — either a scanned/image-only document or a born-blank one (mirrors
-// TextExtractor.SCANNED_PDF_MESSAGE / BLANK_PDF_MESSAGE, which both contain this phrase).
-const string TEXTLESS_PDF_SENTINEL = "no extractable text";
+// Decodes an inherently textual file into a string, honouring a UTF-8/UTF-16 byte-order
+// mark and recognising BOM-less UTF-16, both of which are common on an SMB share. Returns
+// an `error` when the bytes are not text in any of those encodings.
+isolated function decodeText(byte[] content) returns string|error = @java:Method {
+    'class: "io.ballerina.lib.ai.azure.storage.files.TextExtractor",
+    name: "decodeText"
+} external;
 
-// Reports whether an error denotes a text-less PDF (scanned/image-only or blank). The
-// loader uses this to skip such files in directory listings (with a warning) — like other
-// non-text content — while an explicitly named text-less PDF surfaces the descriptive,
+// The sentinel phrase the native extractor embeds in every "parsed fine, but there is no
+// text" message — a scanned/image-only PDF, a blank PDF, or an empty Office document.
+// Mirrors `TextExtractor.NO_EXTRACTABLE_TEXT_SENTINEL`; keep the two in sync.
+const string NO_EXTRACTABLE_TEXT_SENTINEL = "no extractable text";
+
+// Reports whether an error denotes a document that parsed successfully but holds no text.
+// The loader uses this to skip such files in directory listings (with a warning) — like
+// other non-text content — while an explicitly named one surfaces the descriptive,
 // case-specific error to the caller.
-isolated function isTextlessPdfError(error err) returns boolean =>
-    err.message().includes(TEXTLESS_PDF_SENTINEL);
+isolated function isNoExtractableTextError(error err) returns boolean =>
+    err.message().includes(NO_EXTRACTABLE_TEXT_SENTINEL);
 
 // Classifies a file by how its text is obtained, using MIME type then extension.
 isolated function classify(string fileName, string? mimeType) returns DocumentKind {
@@ -134,6 +146,56 @@ isolated function matchesExtensionFilter(string fileName, string[]? includeExten
     return false;
 }
 
+// The page size requested for every directory, file and share listing.
+//
+// Azure caps a single `List Directories and Files` page at 5,000 entries and will not return
+// more however large a `maxresults` is asked for. Requesting it explicitly is what makes
+// truncation *detectable*: a page that comes back exactly full is the signal that Azure had
+// more to give. Continuing past it is not possible here, because the connector projects only
+// `/<Entries>/<File>` out of the response and discards Azure's `NextMarker`, so
+// `files:FileList.Marker` is never populated.
+const int LISTING_PAGE_SIZE = 5000;
+
+// The file name used to probe whether a directory exists (see `probeDirectory`). It must be a
+// name no real file would carry, since the probe reads "not found" as the good outcome.
+const string EMPTINESS_PROBE_FILE = ".__ballerina_azure_files_existence_probe__";
+
+// Fails when a listing came back exactly one page long, which means Azure had more entries to
+// give and this loader cannot ask for them.
+//
+// Returning the truncated page would silently drop documents from a knowledge base, and a
+// knowledge base that is quietly missing a thousand files is worse than one that refuses to
+// build, so this is an error rather than a warning. A directory holding exactly
+// `LISTING_PAGE_SIZE` entries trips it too; that false positive is the acceptable side of the
+// trade. Narrow the load with `paths` or `includeExtensions` to get under the cap.
+isolated function checkListingComplete(int entryCount, string kind, string directoryPath, string share)
+        returns ai:Error? {
+    if entryCount < LISTING_PAGE_SIZE {
+        return ();
+    }
+    return error ai:Error(string `Listing the ${kind} of '${directoryPath}' in share '${share}' ` +
+        string `returned a full page of ${LISTING_PAGE_SIZE} entries, so Azure has more that ` +
+        string `cannot be retrieved: the underlying connector does not surface the continuation ` +
+        string `marker. Loading the truncated page would silently drop documents. Narrow the ` +
+        string `load with 'paths' or 'includeExtensions' so each directory stays under the cap`);
+}
+
+// Matches the `sig` query parameter of an Azure SAS token, the HMAC signature that makes the
+// token usable. The name is spelled as a character class rather than with an inline `(?i)`
+// flag so that case-insensitivity does not collide with the `\s` escape in the value part.
+final regexp:RegExp SAS_SIGNATURE = re `[sS][iI][gG]=[^&\s]*`;
+
+// Strips the SAS signature out of a message before it is interpolated into an `ai:Error`.
+//
+// A SAS token travels in the query string, and the `files` connector concatenates the whole
+// request path — token included — into several of its error messages (`getFileList` and
+// `getDirectoryList` both do, for instance). Those messages end up inside `ai:Error`s that
+// applications routinely log, so a live storage credential could be written to a log file.
+// Redacting the signature leaves the rest of the URL intact for diagnosis while making what
+// remains useless to replay.
+isolated function redactSecrets(string message) returns string =>
+    SAS_SIGNATURE.replaceAll(message, "sig=<redacted>");
+
 // Parses an ISO 8601 timestamp into `time:Utc`, or `()` if absent/unparseable.
 // Azure Files' directory/file listings report timestamps in RFC 1123 form, which
 // `time:utcFromString` does not accept, so those are dropped gracefully (see the README).
@@ -145,8 +207,11 @@ isolated function toUtc(string? dateTime) returns time:Utc? {
     return utc is time:Utc ? utc : ();
 }
 
-// Removes duplicate strings, preserving first-appearance order (used to de-dup share
-// names returned by a paginated `listShares`).
+// Removes duplicate strings, preserving first-appearance order. Applied to share names as
+// a safety net only: `listShares` returns a single, un-paginated page and Azure share names
+// are unique within an account, so this is not expected to remove anything today. It guards
+// the day the connector grows a continuation marker and the loader starts concatenating
+// pages (see `resolveShares`).
 isolated function dedupeStrings(string[] values) returns string[] {
     string[] result = [];
     map<boolean> seen = {};

@@ -27,8 +27,10 @@ dependencies {
 
     // Apache Tika: text extraction for PDF and Microsoft Office documents. Compiled
     // against here; the same jars (plus the POI runtime stack) are declared as platform
-    // dependencies in Ballerina.toml. `AutoDetectParser` (in tika-core) delegates to the
-    // pdf-module (PDFBox) and microsoft-module (POI) parsers found on the classpath.
+    // dependencies in Ballerina.toml. `TextExtractor` instantiates the concrete parser it
+    // needs (`PDFParser` from the pdf-module, `OOXMLParser`/`OfficeParser` from the
+    // microsoft-module) rather than going through `AutoDetectParser` — see that class's
+    // javadoc for the reason.
     implementation group: 'org.apache.tika', name: 'tika-core', version: "${tikaVersion}"
     implementation group: 'org.apache.tika', name: 'tika-parser-pdf-module', version: "${tikaVersion}"
     implementation group: 'org.apache.tika', name: 'tika-parser-microsoft-module', version: "${tikaVersion}"

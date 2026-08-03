@@ -21,6 +21,8 @@ import io.ballerina.runtime.api.creators.ErrorCreator;
 import io.ballerina.runtime.api.utils.StringUtils;
 import io.ballerina.runtime.api.values.BArray;
 import io.ballerina.runtime.api.values.BString;
+import org.apache.tika.exception.EncryptedDocumentException;
+import org.apache.tika.exception.WriteLimitReachedException;
 import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.metadata.TikaCoreProperties;
@@ -35,6 +37,13 @@ import org.xml.sax.ContentHandler;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Locale;
 
 /**
@@ -64,21 +73,57 @@ import java.util.Locale;
  */
 public final class TextExtractor {
 
-    // A BodyContentHandler write limit of -1 means "no limit" on extracted content size.
-    private static final int UNLIMITED_CONTENT_SIZE = -1;
+    /**
+     * Upper bound on the number of characters extracted from a single document.
+     *
+     * <p>A {@code BodyContentHandler} write limit of {@code -1} means "unbounded", which lets
+     * one pathological input (a huge spreadsheet, a decompression bomb, a 4 TiB file — Azure
+     * Files permits them) exhaust the heap and take the whole process down. Anyone who can
+     * write to the share could then halt ingestion at will, so the limit is finite.
+     *
+     * <p>10 million characters is far beyond any document worth embedding (roughly 2 million
+     * words) while capping worst-case retained text at ~20 MB. Exceeding it is not an error:
+     * extraction stops and the truncated text is returned with a warning, because a partially
+     * indexed large document is more useful than a failed load.
+     */
+    private static final int MAX_EXTRACTED_CHARS = 10_000_000;
 
     /**
-     * The error message returned for a PDF that parses successfully but yields no text —
-     * either a scanned/image-only document or a genuinely blank one. PDFBox extracts only
-     * the text layer, so without this check such a PDF would silently produce an EMPTY
-     * document. One neutral message covers both cases (the loader cannot know which it is
-     * without OCR). The Ballerina layer matches the {@code "no extractable text"} phrase
-     * (see {@code isTextlessPdfError} in {@code utils.bal}) to skip such files in directory
-     * listings while surfacing this error for explicitly named paths.
+     * The phrase shared by every "parsed fine, but there is no text" message. The Ballerina
+     * layer matches on it (see {@code isNoExtractableTextError} in {@code utils.bal}) to skip
+     * such files in directory listings while surfacing the descriptive message for a path the
+     * caller named explicitly. Keep it in sync with {@code NO_EXTRACTABLE_TEXT_SENTINEL}.
+     */
+    static final String NO_EXTRACTABLE_TEXT_SENTINEL = "no extractable text";
+
+    /**
+     * The message for a PDF that parses successfully but yields no text — either a
+     * scanned/image-only document or a genuinely blank one. PDFBox extracts only the text
+     * layer, so without this check such a PDF would silently produce an empty document. One
+     * neutral message covers both cases, since the loader cannot tell them apart without OCR.
      */
     static final String TEXTLESS_PDF_MESSAGE =
-            "the PDF contains no extractable text content (it may be a scanned/image-only "
-                    + "document or an empty one); OCR is not supported";
+            "the PDF contains " + NO_EXTRACTABLE_TEXT_SENTINEL + " content (it may be a "
+                    + "scanned/image-only document or an empty one); OCR is not supported";
+
+    /**
+     * The message for a non-PDF document that parses successfully but yields no text (an
+     * empty or whitespace-only Office file). Without this check such a file would produce an
+     * {@code ai:TextDocument} with empty content, which then gets chunked and embedded,
+     * polluting the vector store with meaningless vectors.
+     */
+    static final String TEXTLESS_DOCUMENT_MESSAGE =
+            "the document contains " + NO_EXTRACTABLE_TEXT_SENTINEL + " content (it is empty "
+                    + "or contains only whitespace)";
+
+    /** The message for a document that cannot be parsed because it is encrypted. */
+    static final String ENCRYPTED_DOCUMENT_MESSAGE =
+            "the document is password-protected, so its text cannot be extracted";
+
+    /** The message for a file classified as plain text whose bytes are not text at all. */
+    static final String NOT_TEXT_MESSAGE =
+            "the file is not valid UTF-8, UTF-16 or BOM-marked text; it may be binary content "
+                    + "with a text file extension";
 
     private TextExtractor() {
     }
@@ -92,9 +137,9 @@ public final class TextExtractor {
      */
     public static Object extractText(BArray content, BString fileName) {
         byte[] bytes = content.getBytes();
+        Parser parser = selectParser(fileName.getValue());
+        BodyContentHandler handler = new BodyContentHandler(MAX_EXTRACTED_CHARS);
         try (InputStream stream = new ByteArrayInputStream(bytes)) {
-            Parser parser = selectParser(fileName.getValue());
-            BodyContentHandler handler = new BodyContentHandler(UNLIMITED_CONTENT_SIZE);
             Metadata metadata = new Metadata();
             metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, fileName.getValue());
             ParseContext context = new ParseContext();
@@ -105,19 +150,153 @@ public final class TextExtractor {
             pdfConfig.setOcrStrategy(PDFParserConfig.OCR_STRATEGY.NO_OCR);
             context.set(PDFParserConfig.class, pdfConfig);
             parser.parse(stream, handler, metadata, context);
-            String text = handler.toString();
-            // A PDF that parses but yields no text is either a scan (pages are images) or a
-            // genuinely blank document: PDFBox reads only the text layer, so surface a
-            // descriptive error instead of silently returning an empty document.
-            if (parser instanceof PDFParser && text.trim().isEmpty()) {
-                return ErrorCreator.createError(StringUtils.fromString(TEXTLESS_PDF_MESSAGE));
-            }
-            return StringUtils.fromString(text);
+        } catch (WriteLimitReachedException e) {
+            // The document is larger than MAX_EXTRACTED_CHARS. The handler still holds
+            // everything read up to the limit, so return that rather than failing the file:
+            // a truncated document is more useful to a knowledge base than none.
+            return StringUtils.fromString(handler.toString());
+        } catch (EncryptedDocumentException | org.apache.poi.EncryptedDocumentException e) {
+            // Password-protected files are common on shared drives and the generic Tika
+            // message for them is opaque, so report the cause the user can act on.
+            return ErrorCreator.createError(StringUtils.fromString(ENCRYPTED_DOCUMENT_MESSAGE));
         } catch (Exception e) {
             String message = e.getMessage();
             return ErrorCreator.createError(StringUtils.fromString(
                     message != null ? message : e.getClass().getSimpleName()));
         }
+        String text = handler.toString();
+        // A document that parses but yields no text would otherwise become an ai:TextDocument
+        // with empty content, which is then chunked and embedded into the vector store as a
+        // meaningless vector. Surface a descriptive error instead and let the loader skip it.
+        if (text.trim().isEmpty()) {
+            return ErrorCreator.createError(StringUtils.fromString(
+                    parser instanceof PDFParser ? TEXTLESS_PDF_MESSAGE : TEXTLESS_DOCUMENT_MESSAGE));
+        }
+        return StringUtils.fromString(text);
+    }
+
+    /**
+     * Decodes an inherently textual file (.txt, .csv, .json, …) into a string.
+     *
+     * <p>Azure Files is an SMB share, so plain-text files written by Windows tooling are
+     * routinely UTF-16LE or UTF-8-with-BOM rather than plain UTF-8. Decoding strict UTF-8 (as
+     * {@code string:fromBytes} does) fails outright on the former and leaves a stray
+     * {@code U+FEFF} at the head of the content on the latter, which then flows into every
+     * chunk and embedding.
+     *
+     * <p>Detection is deterministic rather than statistical: a byte-order mark decides the
+     * charset when present, otherwise strict UTF-8 is attempted, and only then is a BOM-less
+     * UTF-16 file recognised from its NUL-byte pattern. Content that is not text in any of
+     * those encodings yields an error, which the caller logs and skips.
+     *
+     * @param content the raw file bytes
+     * @return the decoded text as a {@link BString}, or a Ballerina error if it is not text
+     */
+    public static Object decodeText(BArray content) {
+        byte[] bytes = content.getBytes();
+        Charset bomCharset = charsetFromBom(bytes);
+        if (bomCharset != null) {
+            // Decoded strictly, and with the mark itself dropped: a surviving U+FEFF would
+            // otherwise head the content and flow into every chunk and embedding. A BOM on
+            // bytes that are then malformed (a truncated file, or binary that merely opens
+            // with FF FE) is not text, so it falls through to the error below.
+            int bomLength = bomLength(bomCharset);
+            byte[] body = Arrays.copyOfRange(bytes, bomLength, bytes.length);
+            String decoded = decodeStrict(body, bomCharset);
+            if (decoded != null) {
+                return StringUtils.fromString(decoded);
+            }
+            return ErrorCreator.createError(StringUtils.fromString(NOT_TEXT_MESSAGE));
+        }
+        // The BOM-less UTF-16 check has to run before UTF-8, not after it. ASCII-range text
+        // encoded as UTF-16 is *also* well-formed UTF-8 — the interleaved NULs simply decode
+        // as U+0000 — so trying UTF-8 first would always win and yield a string with a NUL
+        // between every character. Genuine UTF-8 text does not carry a regular NUL pattern,
+        // so this ordering costs nothing.
+        Charset utf16 = guessBomlessUtf16(bytes);
+        if (utf16 != null) {
+            String decoded = decodeStrict(bytes, utf16);
+            if (decoded != null) {
+                return StringUtils.fromString(decoded);
+            }
+        }
+        String utf8 = decodeStrict(bytes, StandardCharsets.UTF_8);
+        if (utf8 != null) {
+            return StringUtils.fromString(utf8);
+        }
+        return ErrorCreator.createError(StringUtils.fromString(NOT_TEXT_MESSAGE));
+    }
+
+    /** Returns the charset indicated by a leading byte-order mark, or {@code null}. */
+    private static Charset charsetFromBom(byte[] bytes) {
+        if (bytes.length >= 3 && (bytes[0] & 0xFF) == 0xEF && (bytes[1] & 0xFF) == 0xBB
+                && (bytes[2] & 0xFF) == 0xBF) {
+            return StandardCharsets.UTF_8;
+        }
+        if (bytes.length >= 2 && (bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xFE) {
+            return StandardCharsets.UTF_16LE;
+        }
+        if (bytes.length >= 2 && (bytes[0] & 0xFF) == 0xFE && (bytes[1] & 0xFF) == 0xFF) {
+            return StandardCharsets.UTF_16BE;
+        }
+        return null;
+    }
+
+    private static int bomLength(Charset charset) {
+        return charset.equals(StandardCharsets.UTF_8) ? 3 : 2;
+    }
+
+    /**
+     * Decodes with malformed- and unmappable-input reporting enabled, returning {@code null}
+     * when the bytes are not valid in that charset. The permissive default would instead
+     * substitute U+FFFD and silently produce mojibake.
+     */
+    private static String decodeStrict(byte[] bytes, Charset charset) {
+        CharsetDecoder decoder = charset.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+        try {
+            return decoder.decode(ByteBuffer.wrap(bytes)).toString();
+        } catch (CharacterCodingException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Recognises BOM-less UTF-16 from its NUL-byte pattern, returning the charset or
+     * {@code null}. Text in the ASCII range encodes as a NUL paired with each character, so a
+     * strong imbalance of NULs between even and odd offsets identifies the endianness. Binary
+     * content rarely shows that regularity, and requiring a clear majority keeps this from
+     * firing on a file that merely contains a few NULs.
+     */
+    private static Charset guessBomlessUtf16(byte[] bytes) {
+        if (bytes.length < 2) {
+            return null;
+        }
+        int evenNuls = 0;
+        int oddNuls = 0;
+        int examined = Math.min(bytes.length, 4096);
+        for (int i = 0; i < examined; i++) {
+            if (bytes[i] == 0) {
+                if (i % 2 == 0) {
+                    evenNuls++;
+                } else {
+                    oddNuls++;
+                }
+            }
+        }
+        int pairs = examined / 2;
+        if (pairs == 0) {
+            return null;
+        }
+        // UTF-16LE puts the NUL at the odd offset of each pair, UTF-16BE at the even one.
+        if (oddNuls > pairs * 0.7 && evenNuls < pairs * 0.1) {
+            return StandardCharsets.UTF_16LE;
+        }
+        if (evenNuls > pairs * 0.7 && oddNuls < pairs * 0.1) {
+            return StandardCharsets.UTF_16BE;
+        }
+        return null;
     }
 
     /**

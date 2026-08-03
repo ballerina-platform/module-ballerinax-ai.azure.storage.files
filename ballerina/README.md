@@ -36,19 +36,56 @@ Azure Files is accessed through the `ballerinax/azure_storage_service.files` con
 
 The service endpoint is derived from the account name as `https://{accountName}.file.core.windows.net`.
 
+### Configuring credentials
+
+An account access key grants full control of the storage account, and a SAS token grants
+whatever it was signed for — both are secrets and neither belongs in source control. Declare
+them as `configurable` values and supply them at run time through `Config.toml`, which this
+repository already git-ignores:
+
+```ballerina
+configurable string accountName = ?;
+configurable string accessKeyOrSAS = ?;
+```
+
+```toml
+# Config.toml — never commit this file
+accountName = "contosostorage"
+accessKeyOrSAS = "sv=2022-11-02&ss=f&srt=co&sp=rl&sig=<signature>"
+```
+
+Ballerina also reads `configurable` values from environment variables and CLI arguments, which
+is usually how they are injected in a container or CI environment.
+
+Prefer a SAS over the account key, and sign it as narrowly as the job allows: this loader only
+ever reads and lists, so `sp=rl` on the file service is sufficient. Give it a short expiry and
+rotate it.
+
+> **Note:** a SAS travels in the URL query string, so it can appear in the connector's error
+> messages. The loader strips the `sig` value from any connector message it interpolates into
+> an `ai:Error`, but treat storage-related error text as sensitive regardless of where you
+> forward it.
+
 ## Usage
 
 ### Initialization
 
+Both this package and the underlying connector end in `files`, so the loader import needs an
+alias to avoid a duplicate prefix:
+
 ```ballerina
-import ballerina/ai;
-import ballerinax/ai.azure.storage.files;
+import ballerinax/ai.azure.storage.files as azureFiles;
 import ballerinax/azure_storage_service.files;
 
-final file:TextDataLoader loader = check new (
+// Credentials are secrets: keep them out of the source and supply them through Config.toml
+// or the environment. See "Configuring credentials" below.
+configurable string accountName = ?;
+configurable string accessKeyOrSAS = ?;
+
+final azureFiles:TextDataLoader loader = check new (
     {
-        accountName: "contosostorage",
-        accessKeyOrSAS: "sv=2022-11-02&ss=f&srt=co&sp=rl&sig=...",
+        accountName,
+        accessKeyOrSAS,
         authorizationMethod: files:SAS
     },
     [
@@ -75,12 +112,12 @@ If the application already holds a `files:FileClient`, pass it in place of the `
 
 ```ballerina
 final files:FileClient fileClient = check new ({
-    accountName: "contosostorage",
-    accessKeyOrSAS: "sv=2022-11-02&ss=f&srt=co&sp=rl&sig=...",
+    accountName,
+    accessKeyOrSAS,
     authorizationMethod: files:SAS
 });
 
-final file:TextDataLoader loader = check new ({fileClient}, [{share: "documents"}]);
+final azureFiles:TextDataLoader loader = check new ({fileClient}, [{share: "documents"}]);
 ```
 
 This shares one connection pool across every loader (and any other connector use) built on that client. Clients supplied this way are **not** owned by the loader: the caller remains responsible for their lifecycle.
@@ -88,7 +125,7 @@ This shares one connection pool across every loader (and any other connector use
 The connector splits its API across two clients, so reading from **every** share (`share: "*"`) additionally needs a `files:ManagementClient` — that is what `listShares` lives on. Supply it alongside the file client:
 
 ```ballerina
-final file:TextDataLoader loader = check new (
+final azureFiles:TextDataLoader loader = check new (
     {fileClient, managementClient},
     [{share: "*", paths: ["/shared"]}]
 );
@@ -145,12 +182,33 @@ public function main() returns error? {
 
 Each returned `ai:TextDocument` carries metadata including the file name (`fileName`) and — when reported by Azure — the `fileSize`.
 
-> **Note:** Azure Files' directory/file listings do not report a content type or per-file timestamps. Classification therefore relies on the file extension, and `mimeType` / `createdAt` / `modifiedAt` are omitted from the document metadata.
+> **Note:** `mimeType`, `createdAt` and `modifiedAt` are **never** set on the returned metadata. Azure Files' *listings* report neither, and although `Get File Properties` does return `Content-Type`, `Last-Modified` and `x-ms-creation-time`, the connector discards response headers, so the loader has no way to read them. Classification therefore relies entirely on the file extension. The `fileSize` reported by a listing may also be stale, since an SMB or NFS client can modify a file locally without the listing being updated.
 
 ## Limitations
 
-- **Single-page listings.** The underlying connector (`azure_storage_service` 4.3.4) does not surface the Azure continuation marker (`NextMarker`) for directory, file, or share listings, so each listing returns a single page — Azure's default of up to 5000 entries per directory. Shares or directories with more than 5000 immediate entries are not paged fully. Recursion into sub-directories is unaffected.
+- **Single-page listings.** The underlying connector (`azure_storage_service` 4.3.4) does not surface the Azure continuation marker (`NextMarker`) for directory, file, or share listings, so each listing returns a single page of up to 5000 entries. A directory with more than that **fails the load with an error** rather than returning a truncated result — narrow it with `paths` or `includeExtensions`. A directory holding exactly 5000 entries trips the same check. Recursion into sub-directories is unaffected.
+- **An empty listing costs one extra request to verify.** The connector does not check the
+  HTTP status of its listing calls, so an Azure error (a `403` from an expired SAS, a `503`
+  while throttled, a share that does not exist) arrives looking exactly like an empty
+  directory. Rather than trust it, the loader confirms an empty listing with a single
+  `Get File` probe — which *does* report status — and turns a rejected request into an error
+  instead of an empty result. The cost is one additional request per empty directory.
 - **No content type from listings.** As noted above, classification is extension-based.
+- **A file larger than `maxFileSizeInBytes` is skipped.** Files are buffered whole in memory
+  before extraction, so the default 100 MiB bound protects the process. Raise it deliberately.
+- **Text extraction failures are skipped, not fatal.** A password-protected, corrupt, or
+  mislabeled file inside a directory listing is logged at `WARN` and skipped so that one bad
+  file cannot abort a bulk ingestion run. A path named explicitly in `paths` still errors.
+- **Plain-text encodings.** UTF-8, UTF-8 with BOM, and UTF-16 (with a BOM, or BOM-less where
+  the NUL pattern makes it unambiguous) are decoded. Other legacy code pages are not detected
+  and are reported as an error for that file.
+- **Directory names containing dots.** A path such as `/docs/v1.0` is probed as a file first;
+  if no such file exists it is then listed as a directory. A dotted directory that is *empty*
+  cannot be distinguished from a typo and is reported as an error — append a `/` to force the
+  directory interpretation.
+- **Credentials are static.** Only Shared Key and SAS are supported. Entra ID / managed
+  identity needs `x-ms-file-request-intent`, which requires a newer service version than the
+  connector's pinned `2019-12-12`.
 - **Text, PDF, and Office only.** Text is extracted from inherently textual files, PDFs (PDFBox),
   and Microsoft Office documents (POI). Other binary formats (images, audio, archives) are skipped.
 - **No OCR.** A PDF that yields no text (a scanned/image-only document, or a genuinely blank
@@ -202,3 +260,4 @@ Passed instead of a `files:ConnectionConfig` to reuse already-constructed connec
 | `paths` | `string[]` | `["/"]` | Directory paths and/or explicit file names. The default `["/"]` loads the whole share; `[]` loads nothing |
 | `recursive` | `boolean` | `false` | Whether directories are traversed into sub-directories |
 | `includeExtensions` | `string[]?` | `()` | Extension allowlist applied to directory contents (e.g. `["pdf"]`). Case-insensitive; `()` loads all types. Explicit file paths bypass it |
+| `maxFileSizeInBytes` | `decimal` | `104857600` (100 MiB) | Largest file that will be downloaded and converted. A listed file whose reported size exceeds this is skipped with a warning before it is fetched |

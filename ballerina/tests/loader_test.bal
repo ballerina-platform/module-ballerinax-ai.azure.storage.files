@@ -237,3 +237,74 @@ isolated function testInitWithExistingClientRejectsWildcardWithoutManagementClie
         test:assertFail("Expected an error when a '*' source is given without a management client");
     }
 }
+
+// ---- SAS redaction in surfaced errors ----------------------------------------
+
+@test:Config {}
+isolated function testRedactSecretsStripsSasSignature() {
+    // The connector concatenates the full request path — SAS included — into some of its
+    // error messages, and those messages are interpolated into `ai:Error`s that callers log.
+    string raw = "No files found in received azure response. Path= /share/dir?restype=directory" +
+        "&comp=list&sv=2022-11-02&ss=f&srt=co&sp=rl&sig=abc123DEF456%2Bxyz%3D";
+    string redacted = redactSecrets(raw);
+    test:assertFalse(redacted.includes("abc123DEF456"), "The SAS signature must not survive: " + redacted);
+    test:assertTrue(redacted.includes("sig=<redacted>"), redacted);
+    // The rest of the URL stays intact so the message is still diagnosable.
+    test:assertTrue(redacted.includes("/share/dir"), redacted);
+    test:assertTrue(redacted.includes("sv=2022-11-02"), redacted);
+}
+
+@test:Config {}
+isolated function testRedactSecretsHandlesSignatureFollowedByAnotherParameter() {
+    string redacted = redactSecrets("path?sig=SECRETVALUE&comp=list");
+    test:assertEquals(redacted, "path?sig=<redacted>&comp=list",
+            "Only the signature value is removed, not what follows it");
+}
+
+@test:Config {}
+isolated function testRedactSecretsLeavesCleanMessagesUnchanged() {
+    string clean = "Path 'reports' was not found in share 'documents'";
+    test:assertEquals(redactSecrets(clean), clean);
+}
+
+// ---- listing truncation detection --------------------------------------------
+
+@test:Config {}
+isolated function testCheckListingCompleteAcceptsPartialPage() {
+    // Anything short of a full page means Azure had nothing more to give.
+    test:assertTrue(checkListingComplete(0, "files", "reports", "documents") is ());
+    test:assertTrue(checkListingComplete(4999, "files", "reports", "documents") is ());
+}
+
+@test:Config {}
+isolated function testCheckListingCompleteRejectsFullPage() {
+    // A page that comes back exactly full means there are more entries that this loader
+    // cannot reach, so the load must fail rather than silently drop them.
+    ai:Error? result = checkListingComplete(5000, "files", "reports", "documents");
+    if result is ai:Error {
+        test:assertTrue(result.message().includes("full page"), result.message());
+        test:assertTrue(result.message().includes("silently drop"), result.message());
+    } else {
+        test:assertFail("A full listing page must be reported, not truncated silently");
+    }
+}
+
+// ---- Azure error codes on connector errors -----------------------------------
+
+@test:Config {}
+isolated function testAzureErrorCodeReadsServerErrorDetail() {
+    files:NotFoundError notFound = error files:NotFoundError("Resource not found.",
+            httpStatus = 404, errorCode = RESOURCE_NOT_FOUND_CODE, message = "not found");
+    test:assertEquals(azureErrorCode(notFound), RESOURCE_NOT_FOUND_CODE);
+
+    files:ForbiddenError forbidden = error files:ForbiddenError("Forbidden. ",
+            httpStatus = 403, errorCode = "AuthenticationFailed", message = "denied");
+    test:assertEquals(azureErrorCode(forbidden), "AuthenticationFailed");
+}
+
+@test:Config {}
+isolated function testAzureErrorCodeNilForNonServerErrors() {
+    // A ProcessingError carries no Azure detail record, so there is no code to read.
+    test:assertTrue(azureErrorCode(error files:ProcessingError("No files found")) is ());
+    test:assertTrue(azureErrorCode(error("something else")) is ());
+}

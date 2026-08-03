@@ -65,11 +65,15 @@ public isolated class TextDataLoader {
             self.fileClient = connection.fileClient;
             self.managementClient = managementClient;
         } else {
-            // `files:ConnectionConfig` includes the open `client.config:ConnectionConfig`, so it
-            // carries an implicit rest field. The compiler cannot then prove it disjoint from
-            // `Clients` and does not narrow this branch, hence the cast — which is safe, as the
-            // union has only these two members and `Clients` was ruled out above.
-            files:ConnectionConfig config = <files:ConnectionConfig>connection;
+            // `files:ConnectionConfig` includes the open `client.config:ConnectionConfig`, so
+            // it carries an implicit rest field. The compiler cannot then prove it disjoint
+            // from `Clients` and does not narrow this branch. `ensureType` rather than a cast:
+            // a cast would panic, and `init` promises to report failures as `ai:Error?`.
+            files:ConnectionConfig|error config = connection.ensureType();
+            if config is error {
+                return error ai:Error("The 'connection' value is neither a valid " +
+                    "'files:ConnectionConfig' nor a 'Clients' record", config);
+            }
             self.fileClient = check newFileClient(config);
             self.managementClient = needsManagement ? check newManagementClient(config) : ();
         }
@@ -88,8 +92,7 @@ public isolated class TextDataLoader {
             boolean tolerateMissing = src.share == "*";
             foreach string share in shares {
                 foreach string rawPath in src.paths {
-                    ai:Document[] loaded = check self.loadPath(share, rawPath, src.recursive,
-                            src.includeExtensions, tolerateMissing);
+                    ai:Document[] loaded = check self.loadPath(share, rawPath, src, tolerateMissing);
                     documents.push(...loaded);
                 }
             }
@@ -114,14 +117,18 @@ public isolated class TextDataLoader {
             // the config or requires the caller to have supplied one, failing otherwise.
             return error ai:Error("The management client required for a '*' share was not initialized");
         }
-        files:SharesList|files:Error result = managementClient->listShares();
+        files:SharesList|files:Error result = managementClient->listShares(
+                {maxresults: LISTING_PAGE_SIZE.toString()});
         if result is files:SharesList {
-            return dedupeStrings(shareNames(result));
+            string[] names = dedupeStrings(shareNames(result));
+            check checkListingComplete(names.length(), "shares", "/", share);
+            return names;
         }
         if isEmptyListing(result) {
             return [];
         }
-        return error ai:Error(string `Failed to list shares in the storage account: ${result.message()}`, result);
+        return error ai:Error(
+            string `Failed to list shares in the storage account: ${redactSecrets(result.message())}`, result);
     }
 
     // Loads a single configured path within a share. The share root (`"/"`/`""`) or a
@@ -129,12 +136,11 @@ public isolated class TextDataLoader {
     // explicitly named file; if no such file exists it is treated as a directory, unless it
     // looks like a file (has an extension), in which case a missing file is an error (typo
     // detection) — except under `tolerateMissing` (the `"*"` case), where it is skipped.
-    private isolated function loadPath(string share, string rawPath, boolean recursive,
-            string[]? includeExtensions, boolean tolerateMissing) returns ai:Document[]|ai:Error {
+    private isolated function loadPath(string share, string rawPath, Source src, boolean tolerateMissing)
+            returns ai:Document[]|ai:Error {
         string normalized = normalizePath(rawPath);
         if normalized == "" || normalized.endsWith("/") {
-            return self.listDirectory(share, trimTrailingSlash(normalized), recursive, includeExtensions,
-                    tolerateMissing);
+            return self.listDirectory(share, trimTrailingSlash(normalized), src, tolerateMissing);
         }
 
         // Ambiguous file-or-directory path: probe for an exact file first.
@@ -142,6 +148,14 @@ public isolated class TextDataLoader {
         byte[]|files:Error content = self.fileClient->getFileAsByteArray(share, fileName,
                 directoryPath == "" ? () : directoryPath);
         if content is byte[] {
+            // The size of a path named directly is not known until it has been fetched: the
+            // connector exposes no properties/HEAD call, so unlike a listed file this one can
+            // only be rejected after the download. The limit still bounds extraction.
+            if <decimal>content.length() > src.maxFileSizeInBytes {
+                return error ai:Error(string `File '${rawPath}' in share '${share}' is ` +
+                    string `${content.length()} bytes, which exceeds the configured ` +
+                    string `'maxFileSizeInBytes' of ${src.maxFileSizeInBytes}`);
+            }
             // An explicitly named file is always loaded, regardless of the extension filter.
             // A deliberately named non-text file is an error, unlike directory contents.
             ai:TextDocument? document = check buildDocument(content, fileName, (),
@@ -152,19 +166,24 @@ public isolated class TextDataLoader {
             return [document];
         }
         if !isNotFoundError(content) {
-            return error ai:Error(
-                string `Failed to load path '${rawPath}' from share '${share}': ${content.message()}`, content);
+            return error ai:Error(string `Failed to load path '${rawPath}' from share ` +
+                string `'${share}': ${redactSecrets(content.message())}`, content);
         }
-        // No exact file. If the path looks like a file, a missing file is an error (unless
-        // tolerated); otherwise treat it as a directory and list it.
+        // No file of that name. A path that looks like a file may still be a directory —
+        // Azure Files permits dots in directory names (`/docs/v1.0`, `/2026.Q1`) — so the
+        // extension heuristic alone must not decide. Try listing it before giving up.
         if getExtension(normalized) != "" {
+            ai:Document[] documents = check self.listDirectory(share, normalized, src, true);
+            if documents.length() > 0 {
+                return documents;
+            }
             if tolerateMissing {
                 return [];
             }
-            return error ai:Error(
-                string `Failed to load path '${rawPath}' from share '${share}': file not found`);
+            return error ai:Error(string `Failed to load path '${rawPath}' from share '${share}': ` +
+                string `no file of that name exists, and no directory of that name holds loadable files`);
         }
-        return self.listDirectory(share, normalized, recursive, includeExtensions, tolerateMissing);
+        return self.listDirectory(share, normalized, src, tolerateMissing);
     }
 
     // Lists a directory: converts its files into documents and, when `recursive`, descends
@@ -172,27 +191,44 @@ public isolated class TextDataLoader {
     // (`getFileList` / `getDirectoryList`), so — unlike the flat-namespace Blob loader — no
     // direct-child filtering is needed; a non-recursive load is simply this directory's files.
     // An empty directory is not an error; a missing directory is tolerated only under `"*"`.
-    private isolated function listDirectory(string share, string directoryPath, boolean recursive,
-            string[]? includeExtensions, boolean tolerateMissing) returns ai:Document[]|ai:Error {
+    private isolated function listDirectory(string share, string directoryPath, Source src,
+            boolean tolerateMissing) returns ai:Document[]|ai:Error {
         FileEntry[] entries = check self.listFiles(share, directoryPath, tolerateMissing);
 
         ai:Document[] documents = [];
         foreach FileEntry entry in entries {
-            if !matchesExtensionFilter(entry.name, includeExtensions) {
+            if !matchesExtensionFilter(entry.name, src.includeExtensions) {
                 continue;
             }
-            ai:TextDocument?|ai:Error document = self.toDocument(share, entry);
+            // The listing reports each file's size, so an oversized file is rejected before
+            // it is fetched — the whole body is otherwise held in memory at once.
+            decimal? contentLength = entry.contentLength;
+            if contentLength is decimal && contentLength > src.maxFileSizeInBytes {
+                log:printWarn("Skipping an Azure Files file larger than 'maxFileSizeInBytes'",
+                        fileName = entry.name, directory = directoryPath, share = share,
+                        fileSize = contentLength, level = src.maxFileSizeInBytes);
+                continue;
+            }
+
+            byte[]|ai:Error content = self.downloadFile(share, entry);
+            if content is ai:Error {
+                // A download failure is an infrastructure problem (auth, throttling, a
+                // vanished file), not a property of the content, so it aborts the walk
+                // rather than quietly shrinking the result set.
+                return content;
+            }
+            ai:TextDocument?|ai:Error document = buildDocument(content, entry.name, (),
+                    entry.contentLength ?: <decimal>content.length(), (), ());
             if document is ai:Error {
-                // A text-less PDF (scanned/image-only or blank) has no text to extract;
-                // inside a listing it is skipped like other non-text content rather than
-                // aborting the whole walk. (An explicitly named one still surfaces the
-                // descriptive error to the caller.)
-                if isTextlessPdfError(document) {
-                    log:printWarn("Skipping a PDF with no extractable text content",
-                            fileName = entry.name, directory = directoryPath, share = share);
-                    continue;
-                }
-                return document;
+                // The file was fetched but its bytes could not be turned into text: a
+                // scanned PDF, a password-protected or corrupt Office file, a mislabeled
+                // binary. One such file must not abort a bulk ingestion run, so it is
+                // skipped like other non-text content. (A path named explicitly in `paths`
+                // still surfaces the descriptive error to the caller.)
+                log:printWarn("Skipping an Azure Files file whose text could not be extracted",
+                        fileName = entry.name, directory = directoryPath, share = share,
+                        reason = document.message());
+                continue;
             }
             if document is ai:TextDocument {
                 documents.push(document);
@@ -202,11 +238,10 @@ public isolated class TextDataLoader {
             }
         }
 
-        if recursive {
+        if src.recursive {
             foreach string subDirectory in check self.listSubDirectories(share, directoryPath, tolerateMissing) {
                 string childPath = directoryPath == "" ? subDirectory : (directoryPath + "/" + subDirectory);
-                ai:Document[] childDocuments = check self.listDirectory(share, childPath, true,
-                        includeExtensions, tolerateMissing);
+                ai:Document[] childDocuments = check self.listDirectory(share, childPath, src, tolerateMissing);
                 documents.push(...childDocuments);
             }
         }
@@ -219,12 +254,18 @@ public isolated class TextDataLoader {
     private isolated function listFiles(string share, string directoryPath, boolean tolerateMissing)
             returns FileEntry[]|ai:Error {
         string? directoryArg = directoryPath == "" ? () : directoryPath;
-        files:FileList|files:Error fileList = self.fileClient->getFileList(share, directoryArg);
+        files:FileList|files:Error fileList = self.fileClient->getFileList(share, directoryArg,
+                {maxresults: LISTING_PAGE_SIZE.toString()});
         if fileList is files:FileList {
-            return toFileEntries(fileList, directoryPath);
+            FileEntry[] entries = toFileEntries(fileList, directoryPath);
+            check checkListingComplete(entries.length(), "files", directoryPath, share);
+            return entries;
         }
         if isEmptyListing(fileList) {
-            // The directory exists but contains no files (it may still hold sub-directories).
+            // "No files found" is not proof of an empty directory: the connector returns the
+            // same sentinel for any response whose XML holds no <File> entries, which
+            // includes every Azure *error* body. Confirm before believing it.
+            check self.probeDirectory(share, directoryPath, tolerateMissing);
             return [];
         }
         if isNotFoundError(fileList) {
@@ -235,7 +276,56 @@ public isolated class TextDataLoader {
                 string `Path '${directoryPath}' was not found in share '${share}'`, fileList);
         }
         return error ai:Error(string `Failed to list files in '${directoryPath}' of share ` +
-            string `'${share}': ${fileList.message()}`, fileList);
+            string `'${share}': ${redactSecrets(fileList.message())}`, fileList);
+    }
+
+    // Establishes whether a listing that reported "nothing here" really was empty.
+    //
+    // The connector's listing calls never inspect the HTTP status, so a 403 from an expired
+    // SAS, a 503 while the account is throttled, and a share that does not exist all arrive
+    // looking exactly like an empty directory. Left alone that fails open: a load quietly
+    // returns no documents and reports success, and a knowledge base silently empties.
+    //
+    // `getFileAsByteArray` does check the status, so asking it for a file that will not exist
+    // turns the ambiguity into a typed answer. Azure distinguishes "the file is missing"
+    // (`ResourceNotFound`) from "its parent is missing" (`ParentNotFound`/`ShareNotFound`),
+    // and answers 403/5xx before either. Returns `()` when the directory genuinely is empty.
+    private isolated function probeDirectory(string share, string directoryPath, boolean tolerateMissing)
+            returns ai:Error? {
+        string? directoryArg = directoryPath == "" ? () : directoryPath;
+        byte[]|files:Error probe = self.fileClient->getFileAsByteArray(share, EMPTINESS_PROBE_FILE, directoryArg);
+        if probe is byte[] {
+            // A file with the probe name actually exists, so the directory certainly does.
+            return ();
+        }
+        if probe is files:ForbiddenError {
+            return error ai:Error(string `Not authorized to read '${directoryPath}' in share ` +
+                string `'${share}' (Azure returned ${probe.detail().errorCode}). The listing came ` +
+                string `back empty because the request was rejected, not because there are no ` +
+                string `files — check that the SAS or account key is valid, unexpired, and ` +
+                string `granted list and read permission on the file service`, probe);
+        }
+        if probe is files:NotFoundError {
+            string errorCode = probe.detail().errorCode;
+            if errorCode == PARENT_NOT_FOUND_CODE || errorCode == SHARE_NOT_FOUND_CODE {
+                if tolerateMissing {
+                    return ();
+                }
+                return error ai:Error(string `Path '${directoryPath}' does not exist in share ` +
+                    string `'${share}' (Azure returned ${errorCode})`, probe);
+            }
+            // `ResourceNotFound`, or a 404 whose code could not be read: the parent resolved,
+            // so the directory is there and the empty listing was truthful.
+            return ();
+        }
+        if probe is files:ServerError {
+            return error ai:Error(string `Could not confirm whether '${directoryPath}' in share ` +
+                string `'${share}' is empty or unreadable: Azure returned HTTP ` +
+                string `${probe.detail().httpStatus} (${probe.detail().errorCode}). Treating an ` +
+                string `unverified empty listing as success would hide the failure`, probe);
+        }
+        return error ai:Error(string `Could not confirm whether '${directoryPath}' in share ` +
+            string `'${share}' is empty or unreadable: ${redactSecrets(probe.message())}`, probe);
     }
 
     // Returns the names of a directory's immediate sub-directories. An empty or missing
@@ -244,29 +334,34 @@ public isolated class TextDataLoader {
     private isolated function listSubDirectories(string share, string directoryPath, boolean tolerateMissing)
             returns string[]|ai:Error {
         string? directoryArg = directoryPath == "" ? () : directoryPath;
-        files:DirectoryList|files:Error directoryList = self.fileClient->getDirectoryList(share, directoryArg);
+        files:DirectoryList|files:Error directoryList = self.fileClient->getDirectoryList(share, directoryArg,
+                {maxresults: LISTING_PAGE_SIZE.toString()});
         if directoryList is files:DirectoryList {
-            return directoryNames(directoryList);
+            string[] names = directoryNames(directoryList);
+            check checkListingComplete(names.length(), "sub-directories", directoryPath, share);
+            return names;
         }
         if isEmptyListing(directoryList) || isNotFoundError(directoryList) {
+            // No probe here: the parent's own file listing has already been verified by
+            // `listFiles`, so a directory that is missing or unreadable has been reported.
             return [];
         }
         return error ai:Error(string `Failed to list sub-directories in '${directoryPath}' of share ` +
-            string `'${share}': ${directoryList.message()}`, directoryList);
+            string `'${share}': ${redactSecrets(directoryList.message())}`, directoryList);
     }
 
-    // Downloads a file's content and converts it into an `ai:TextDocument`, returning `()`
-    // when the file cannot be represented as text (the caller skips it). Azure Files
-    // listings report no content type, so classification falls back to the extension.
-    private isolated function toDocument(string share, FileEntry entry) returns ai:TextDocument?|ai:Error {
+    // Downloads a listed file's content. Kept separate from converting it to a document so
+    // the caller can tell a transport failure (which must abort the walk) from content that
+    // simply cannot be turned into text (which is skipped).
+    private isolated function downloadFile(string share, FileEntry entry) returns byte[]|ai:Error {
         byte[]|files:Error content = self.fileClient->getFileAsByteArray(share, entry.name,
                 entry.directoryPath == "" ? () : entry.directoryPath);
         if content is files:Error {
             return error ai:Error(string `Failed to download file '${entry.name}' from directory ` +
-                string `'${entry.directoryPath}' of share '${share}': ${content.message()}`, content);
+                string `'${entry.directoryPath}' of share '${share}': ` +
+                string `${redactSecrets(content.message())}`, content);
         }
-        decimal? contentLength = entry.contentLength ?: <decimal>content.length();
-        return buildDocument(content, entry.name, (), contentLength, (), entry.lastModified);
+        return content;
     }
 }
 

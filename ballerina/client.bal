@@ -44,6 +44,26 @@ isolated function newManagementClient(files:ConnectionConfig config) returns fil
 // The `files` connector maps every HTTP 404 — regardless of the Azure error code
 // (`ShareNotFound`, `ResourceNotFound`, `ParentNotFound`, …) — to a distinct
 // `files:NotFoundError` (an `http:STATUS_NOT_FOUND` `ServerError`), so a single typed check
-// suffices. The loader uses this to fall back from an explicit-file probe to a
-// directory listing, and to tolerate missing paths under a `share: "*"` source.
+// suffices.
+//
+// This holds only for the operations that call the connector's `checkAndHandleErrors`
+// (`getFileAsByteArray` among them). The *listing* operations do not: see `probeDirectory`.
 isolated function isNotFoundError(error err) returns boolean => err is files:NotFoundError;
+
+// Azure's error code for "the file you asked for is not there, but its parent is". Returned
+// for a `Get File` against a directory that exists.
+const string RESOURCE_NOT_FOUND_CODE = "ResourceNotFound";
+
+// Azure's error codes for "something above the file does not exist".
+const string PARENT_NOT_FOUND_CODE = "ParentNotFound";
+const string SHARE_NOT_FOUND_CODE = "ShareNotFound";
+
+// Reads the Azure error code (`ShareNotFound`, `AuthenticationFailed`, …) carried by a
+// connector error, or `()` when the error is not one the connector built from an Azure
+// response. Only `files:ServerError` and its sub-types carry the detail record.
+isolated function azureErrorCode(error err) returns string? {
+    if err is files:ServerError {
+        return err.detail().errorCode;
+    }
+    return ();
+}
