@@ -20,7 +20,9 @@ version = "1.0.0"
 path = "../native/build/libs/ai.azure.storage.files-native-1.0.0-SNAPSHOT.jar"
 
 # Apache Tika core + PDF parser module (PDFBox) + Microsoft Office parser module (POI).
-# `AutoDetectParser` routes each file to the matching module (see `TextExtractor` / `classify`).
+# `TextExtractor` instantiates the concrete parser directly (`PDFParser`, `OOXMLParser` or
+# `OfficeParser`); `AutoDetectParser` is deliberately not used — see the `TextExtractor`
+# class javadoc for why.
 [[platform.java21.dependency]]
 groupId = "org.apache.tika"
 artifactId = "tika-core"
@@ -36,7 +38,9 @@ groupId = "org.apache.tika"
 artifactId = "tika-parser-microsoft-module"
 version = "3.2.2"
 
-# Tika ZIP/container detection — required so OOXML (.docx/.pptx/.xlsx) files are detected.
+# Tika's shared ZIP/container helpers, used by the OOXML parser when it opens the
+# `.docx`/`.pptx`/`.xlsx` package. (This is not container *detection*: the parser is chosen
+# from the extension in `TextExtractor`, not by Tika detection.)
 [[platform.java21.dependency]]
 groupId = "org.apache.tika"
 artifactId = "tika-parser-zip-commons"
@@ -111,12 +115,12 @@ groupId = "com.zaxxer"
 artifactId = "SparseBitSet"
 version = "1.3"
 
+# Apache POI logs through the Log4j 2 API. Only the API is shipped: without a backing
+# implementation Log4j degrades to a no-op, which is what a library wants. Shipping
+# `log4j-core` as well would inject a logging *implementation* into every consuming
+# application — overriding its logging configuration and adding a CVE-heavy artifact to
+# its dependency tree. Applications that want POI's logs add `log4j-core` themselves.
 [[platform.java21.dependency]]
 groupId = "org.apache.logging.log4j"
 artifactId = "log4j-api"
-version = "2.25.4"
-
-[[platform.java21.dependency]]
-groupId = "org.apache.logging.log4j"
-artifactId = "log4j-core"
 version = "2.25.4"
