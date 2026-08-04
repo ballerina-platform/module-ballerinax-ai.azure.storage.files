@@ -17,6 +17,13 @@
 import ballerina/test;
 import ballerinax/azure_storage_service.files;
 
+// A stand-in for a Shared Key credential, derived at run time from a plainly fake phrase
+// rather than written out as a base64 literal. `newFileClient` only needs the value to be
+// well-formed base64 — nothing decodes or signs with it, since constructing a client makes no
+// network call — and a literal of that shape is indistinguishable from a real account key to a
+// secret scanner, which flags every commit that carries one.
+final string FAKE_ACCESS_KEY = "not-a-real-key-this-value-only-exists-in-unit-tests".toBytes().toBase64();
+
 // ---- newFileClient construction (no network call at init) -------------------
 
 @test:Config {}
@@ -33,8 +40,7 @@ isolated function testNewFileClientWithSas() returns error? {
 isolated function testNewFileClientWithAccessKey() returns error? {
     files:ConnectionConfig config = {
         accountName: "contosostorage",
-        // A syntactically valid base64 access key; no network call is made at construction.
-        accessKeyOrSAS: "dGhpcy1pcy1hLWZha2Uta2V5LWZvci10ZXN0aW5n",
+        accessKeyOrSAS: FAKE_ACCESS_KEY,
         authorizationMethod: files:ACCESS_KEY
     };
     files:FileClient _ = check newFileClient(config);

@@ -19,11 +19,14 @@ import ballerinax/azure_storage_service.files;
 
 // Constructs the Azure Files `FileClient` (directory/file listing + download) from the
 // connector's `ConnectionConfig`, wrapping any construction failure as an `ai:Error`.
+// The connector builds its client from the credential itself, so a construction failure can
+// echo the configured `accessKeyOrSAS` back in its message — hence the redaction.
 isolated function newFileClient(files:ConnectionConfig config) returns files:FileClient|ai:Error {
     files:FileClient|error fileClient = new (config);
     if fileClient is error {
         return error ai:Error(
-            string `Failed to initialize the Azure Files client: ${fileClient.message()}`, fileClient);
+            string `Failed to initialize the Azure Files client: ${redactSecrets(fileClient.message())}`,
+            fileClient);
     }
     return fileClient;
 }
@@ -34,7 +37,8 @@ isolated function newManagementClient(files:ConnectionConfig config) returns fil
     files:ManagementClient|error managementClient = new (config);
     if managementClient is error {
         return error ai:Error(
-            string `Failed to initialize the Azure Files management client: ${managementClient.message()}`,
+            string `Failed to initialize the Azure Files management client: ` +
+                string `${redactSecrets(managementClient.message())}`,
             managementClient);
     }
     return managementClient;

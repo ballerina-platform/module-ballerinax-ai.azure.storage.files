@@ -182,7 +182,7 @@ public isolated class TextDataLoader {
             if contentLength is decimal && contentLength > src.maxFileSizeInBytes {
                 log:printWarn("Skipping an Azure Files file larger than 'maxFileSizeInBytes'",
                         fileName = entry.name, directory = directoryPath, share = share,
-                        fileSize = contentLength, level = src.maxFileSizeInBytes);
+                        fileSize = contentLength, maxFileSizeInBytes = src.maxFileSizeInBytes);
                 continue;
             }
 

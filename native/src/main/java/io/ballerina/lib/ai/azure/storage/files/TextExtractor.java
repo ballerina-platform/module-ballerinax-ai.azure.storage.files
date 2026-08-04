@@ -18,6 +18,10 @@
 package io.ballerina.lib.ai.azure.storage.files;
 
 import io.ballerina.runtime.api.creators.ErrorCreator;
+import io.ballerina.runtime.api.creators.TypeCreator;
+import io.ballerina.runtime.api.creators.ValueCreator;
+import io.ballerina.runtime.api.types.PredefinedTypes;
+import io.ballerina.runtime.api.types.TupleType;
 import io.ballerina.runtime.api.utils.StringUtils;
 import io.ballerina.runtime.api.values.BArray;
 import io.ballerina.runtime.api.values.BString;
@@ -44,7 +48,9 @@ import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Extracts plain text from documents using Apache Tika.
@@ -83,10 +89,19 @@ public final class TextExtractor {
      *
      * <p>10 million characters is far beyond any document worth embedding (roughly 2 million
      * words) while capping worst-case retained text at ~20 MB. Exceeding it is not an error:
-     * extraction stops and the truncated text is returned with a warning, because a partially
-     * indexed large document is more useful than a failed load.
+     * extraction stops and the truncated text is returned, flagged as truncated so the caller
+     * can warn, because a partially indexed large document is more useful than a failed load.
      */
     private static final int MAX_EXTRACTED_CHARS = 10_000_000;
+
+    /**
+     * The {@code [string, boolean]} pair {@code extractText} returns: the extracted text, and
+     * whether it was cut short at {@link #MAX_EXTRACTED_CHARS}. The flag has to travel with the
+     * text because truncated output is otherwise indistinguishable from a complete document —
+     * it is a plain string of no particular length — so the loader could not report the loss.
+     */
+    private static final TupleType EXTRACTION_RESULT_TYPE = TypeCreator.createTupleType(
+            List.of(PredefinedTypes.TYPE_STRING, PredefinedTypes.TYPE_BOOLEAN));
 
     /**
      * The phrase shared by every "parsed fine, but there is no text" message. The Ballerina
@@ -125,6 +140,21 @@ public final class TextExtractor {
             "the file is not valid UTF-8, UTF-16 or BOM-marked text; it may be binary content "
                     + "with a text file extension";
 
+    /**
+     * The MIME types {@link #selectParser} maps to a parser, mirroring the extractable types
+     * the caller's {@code classify} recognises (see {@code EXTRACTABLE_MIME_TYPES} in
+     * {@code utils.bal}); keep the two lists in sync.
+     */
+    private static final String PDF_MIME_TYPE = "application/pdf";
+    private static final Set<String> OOXML_MIME_TYPES = Set.of(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    private static final Set<String> OLE2_MIME_TYPES = Set.of(
+            "application/msword",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.ms-excel");
+
     private TextExtractor() {
     }
 
@@ -133,11 +163,15 @@ public final class TextExtractor {
      *
      * @param content  the raw file bytes
      * @param fileName the file name, used to select the parser and as a Tika hint
-     * @return the extracted text as a {@link BString}, or a Ballerina error on failure
+     * @param mimeType the MIME type when known, which takes precedence over the extension in
+     *                 selecting the parser; Ballerina nil (typed {@code Object}, since a
+     *                 nilable {@code string?} does not map to {@link BString}) when there is none
+     * @return a {@code [text, truncated]} tuple, or a Ballerina error on failure
      */
-    public static Object extractText(BArray content, BString fileName) {
+    public static Object extractText(BArray content, BString fileName, Object mimeType) {
         byte[] bytes = content.getBytes();
-        Parser parser = selectParser(fileName.getValue());
+        Parser parser = selectParser(fileName.getValue(),
+                mimeType instanceof BString mime ? mime.getValue() : null);
         BodyContentHandler handler = new BodyContentHandler(MAX_EXTRACTED_CHARS);
         try (InputStream stream = new ByteArrayInputStream(bytes)) {
             Metadata metadata = new Metadata();
@@ -153,8 +187,9 @@ public final class TextExtractor {
         } catch (WriteLimitReachedException e) {
             // The document is larger than MAX_EXTRACTED_CHARS. The handler still holds
             // everything read up to the limit, so return that rather than failing the file:
-            // a truncated document is more useful to a knowledge base than none.
-            return StringUtils.fromString(handler.toString());
+            // a truncated document is more useful to a knowledge base than none. The caller
+            // logs a warning off the flag, since the text alone does not reveal the loss.
+            return extractionResult(handler.toString(), true);
         } catch (EncryptedDocumentException | org.apache.poi.EncryptedDocumentException e) {
             // Password-protected files are common on shared drives and the generic Tika
             // message for them is opaque, so report the cause the user can act on.
@@ -172,7 +207,15 @@ public final class TextExtractor {
             return ErrorCreator.createError(StringUtils.fromString(
                     parser instanceof PDFParser ? TEXTLESS_PDF_MESSAGE : TEXTLESS_DOCUMENT_MESSAGE));
         }
-        return StringUtils.fromString(text);
+        return extractionResult(text, false);
+    }
+
+    /** Builds the {@code [text, truncated]} tuple returned to the Ballerina layer. */
+    private static BArray extractionResult(String text, boolean truncated) {
+        BArray result = ValueCreator.createTupleValue(EXTRACTION_RESULT_TYPE);
+        result.add(0, StringUtils.fromString(text));
+        result.add(1, truncated);
+        return result;
     }
 
     /**
@@ -300,11 +343,28 @@ public final class TextExtractor {
     }
 
     /**
-     * Selects the Tika parser for a file from its extension. OOXML (.docx/.xlsx/.pptx) and
-     * legacy OLE2 (.doc/.xls/.ppt) Office formats use POI; everything else this method is
-     * called with is a PDF (the caller only routes PDF/Office here), which uses PDFBox.
+     * Selects the Tika parser for a file. OOXML (.docx/.xlsx/.pptx) and legacy OLE2
+     * (.doc/.xls/.ppt) Office formats use POI; everything else this method is called with is a
+     * PDF (the caller only routes PDF/Office here), which uses PDFBox.
+     *
+     * <p>A known MIME type decides on its own and the extension is consulted only otherwise,
+     * matching the precedence the caller's {@code classify} uses. Falling back to the extension
+     * first would send a file the caller classified from its MIME type alone — an Office
+     * document under an extension-less name, say — into the {@link PDFParser} default.
      */
-    private static Parser selectParser(String fileName) {
+    private static Parser selectParser(String fileName, String mimeType) {
+        if (mimeType != null) {
+            String mime = mimeType.toLowerCase(Locale.ROOT);
+            if (OOXML_MIME_TYPES.contains(mime)) {
+                return new OOXMLParser();
+            }
+            if (OLE2_MIME_TYPES.contains(mime)) {
+                return new OfficeParser();
+            }
+            if (PDF_MIME_TYPE.equals(mime)) {
+                return new PDFParser();
+            }
+        }
         String name = fileName.toLowerCase(Locale.ROOT);
         if (name.endsWith(".docx") || name.endsWith(".xlsx") || name.endsWith(".pptx")) {
             return new OOXMLParser();

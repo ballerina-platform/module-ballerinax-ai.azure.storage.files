@@ -17,6 +17,7 @@
 import ballerina/ai;
 import ballerina/jballerina.java;
 import ballerina/lang.regexp;
+import ballerina/log;
 import ballerina/time;
 
 // How a file's content is turned into text, derived from its MIME type / extension.
@@ -63,10 +64,20 @@ isolated function buildDocument(byte[] content, string fileName, string? mimeTyp
             return {content: text, metadata};
         }
         EXTRACTABLE => {
-            string|error text = extractText(content, fileName);
-            if text is error {
+            [string, boolean]|error extracted = extractText(content, fileName, mimeType);
+            if extracted is error {
                 return error ai:Error(
-                    string `Failed to extract text from '${fileName}': ${text.message()}`, text);
+                    string `Failed to extract text from '${fileName}': ${extracted.message()}`, extracted);
+            }
+            [string, boolean] [text, truncated] = extracted;
+            if truncated {
+                // The document held more text than the extractor's per-document cap. The
+                // capped text is still returned — a partially indexed document is more useful
+                // than a failed load — but the dropped tail must not go unreported, since
+                // nothing downstream can tell a truncated document from a complete one.
+                log:printWarn("Truncated the extracted text of an Azure Files document at the " +
+                        "extractor's per-document character limit; the tail was not indexed",
+                        fileName = fileName, extractedCharacters = text.length());
             }
             return {content: text, metadata};
         }
@@ -75,10 +86,16 @@ isolated function buildDocument(byte[] content, string fileName, string? mimeTyp
 }
 
 // Extracts plain text from a PDF or Microsoft Office document using Apache Tika, reading
-// directly from the in-memory bytes (no temporary file). `fileName` is passed as a Tika
-// resource-name hint and selects the parser. Returns an `error` if the content cannot be
-// parsed, is password-protected, or yields no text at all.
-isolated function extractText(byte[] content, string fileName) returns string|error = @java:Method {
+// directly from the in-memory bytes (no temporary file). The parser is selected from
+// `mimeType` when it names a format the extractor knows, and from the extension otherwise —
+// the same precedence `classify` applies, so the two cannot disagree. `fileName` is also
+// passed to Tika as a resource-name hint.
+//
+// Returns the extracted text together with whether it was truncated at the extractor's
+// per-document character limit, or an `error` if the content cannot be parsed, is
+// password-protected, or yields no text at all.
+isolated function extractText(byte[] content, string fileName, string? mimeType)
+        returns [string, boolean]|error = @java:Method {
     'class: "io.ballerina.lib.ai.azure.storage.files.TextExtractor",
     name: "extractText"
 } external;
@@ -103,17 +120,27 @@ const string NO_EXTRACTABLE_TEXT_SENTINEL = "no extractable text";
 isolated function isNoExtractableTextError(error err) returns boolean =>
     err.message().includes(NO_EXTRACTABLE_TEXT_SENTINEL);
 
-// Classifies a file by how its text is obtained, using MIME type then extension.
+// Classifies a file by how its text is obtained: a recognised MIME type decides on its own,
+// and the extension is consulted only when there is no MIME type or it is not one this module
+// knows. The MIME type is the authoritative statement of what the bytes are, so letting an
+// extension override it would classify `report.txt` served as `application/pdf` as plain text
+// and hand a PDF's bytes to the text decoder.
 isolated function classify(string fileName, string? mimeType) returns DocumentKind {
     string mime = (mimeType ?: "").toLowerAscii();
+    if mime != "" {
+        if mime.startsWith("text/") || TEXT_MIME_TYPES.indexOf(mime) !is () {
+            return PLAIN_TEXT;
+        }
+        // PDF and Microsoft Office documents are extracted via Apache Tika (PDFBox / POI).
+        if EXTRACTABLE_MIME_TYPES.indexOf(mime) !is () {
+            return EXTRACTABLE;
+        }
+    }
     string extension = getExtension(fileName);
-    if mime.startsWith("text/") || (mime != "" && TEXT_MIME_TYPES.indexOf(mime) !is ())
-            || TEXT_EXTENSIONS.indexOf(extension) !is () {
+    if TEXT_EXTENSIONS.indexOf(extension) !is () {
         return PLAIN_TEXT;
     }
-    // PDF and Microsoft Office documents are extracted via Apache Tika (PDFBox / POI).
-    if (mime != "" && EXTRACTABLE_MIME_TYPES.indexOf(mime) !is ())
-            || EXTRACTABLE_EXTENSIONS.indexOf(extension) !is () {
+    if EXTRACTABLE_EXTENSIONS.indexOf(extension) !is () {
         return EXTRACTABLE;
     }
     return UNSUPPORTED;

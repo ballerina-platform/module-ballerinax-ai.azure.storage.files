@@ -174,6 +174,10 @@ Each returned `ai:TextDocument` carries metadata including the file name (`fileN
 - **Text extraction failures are skipped, not fatal.** A password-protected, corrupt, or
   mislabeled file inside a directory listing is logged at `WARN` and skipped so that one bad
   file cannot abort a bulk ingestion run. A path named explicitly in `paths` still errors.
+- **Extraction stops after 10 million characters.** A single PDF or Office document yields at
+  most that much text (~20 MB), so no one document can exhaust the heap. A document that hits
+  the cap is still loaded — its text simply ends there — and the truncation is logged at
+  `WARN` with the file name.
 - **Plain-text encodings.** UTF-8, UTF-8 with BOM, and UTF-16 (with a BOM, or BOM-less where
   the NUL pattern makes it unambiguous) are decoded. Other legacy code pages are not detected
   and are reported as an error for that file.

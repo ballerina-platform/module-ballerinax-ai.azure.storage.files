@@ -73,6 +73,23 @@ isolated function testClassifyExtractableOffice() {
 }
 
 @test:Config {}
+isolated function testClassifyMimeTypeBeatsExtension() {
+    // A recognised MIME type is the authoritative statement of what the bytes are, so the
+    // extension must not override it: a PDF listed under a `.txt` name would otherwise be
+    // handed to the text decoder, and a text file named `.pdf` to Tika.
+    test:assertEquals(classify("report.txt", "application/pdf"), EXTRACTABLE);
+    test:assertEquals(classify("notes.pdf", "text/plain"), PLAIN_TEXT);
+}
+
+@test:Config {}
+isolated function testClassifyFallsBackToExtensionForUnknownMimeType() {
+    // A MIME type this module does not know says nothing useful — Azure labels plenty of
+    // files `application/octet-stream` — so the extension still gets its say.
+    test:assertEquals(classify("a.docx", "application/octet-stream"), EXTRACTABLE);
+    test:assertEquals(classify("a.md", "application/octet-stream"), PLAIN_TEXT);
+}
+
+@test:Config {}
 isolated function testClassifyUnsupportedBinary() {
     test:assertEquals(classify("photo.png", ()), UNSUPPORTED);
     test:assertEquals(classify("clip.mp3", ()), UNSUPPORTED);
@@ -119,8 +136,9 @@ isolated function testToUtcNilForNilOrUnparseable() {
 
 @test:Config {}
 isolated function testExtractTextFromPdfBytes() returns error? {
-    string text = check extractText(PDF_BYTES, "sample.pdf");
+    [string, boolean] [text, truncated] = check extractText(PDF_BYTES, "sample.pdf", ());
     test:assertTrue(text.includes(PDF_TEXT), text);
+    test:assertFalse(truncated, "A small document is not truncated");
 }
 
 // ---- text-less PDF detection (scanned/image-only or blank) --------------------
@@ -129,7 +147,7 @@ isolated function testExtractTextFromPdfBytes() returns error? {
 isolated function testExtractTextFromScannedPdfErrors() {
     // The scanned fixture parses fine but has no text layer; the extractor must surface
     // a descriptive error rather than silently returning an empty string.
-    string|error text = extractText(SCANNED_PDF_BYTES, "scan.pdf");
+    [string, boolean]|error text = extractText(SCANNED_PDF_BYTES, "scan.pdf", ());
     if text is error {
         test:assertTrue(text.message().includes(NO_EXTRACTABLE_TEXT_SENTINEL), text.message());
     } else {
@@ -140,7 +158,7 @@ isolated function testExtractTextFromScannedPdfErrors() {
 @test:Config {}
 isolated function testExtractTextFromBlankPdfErrors() {
     // A genuinely blank PDF (no text, no images) gets the same neutral message.
-    string|error text = extractText(BLANK_PDF_BYTES, "blank.pdf");
+    [string, boolean]|error text = extractText(BLANK_PDF_BYTES, "blank.pdf", ());
     if text is error {
         test:assertTrue(text.message().includes(NO_EXTRACTABLE_TEXT_SENTINEL), text.message());
     } else {
@@ -170,35 +188,35 @@ isolated function testIsNoExtractableTextErrorRejectsOtherErrors() {
 @test:Config {}
 isolated function testExtractTextFromDocxBytes() returns error? {
     // The .docx path exercises the POI-backed OOXML parser (tika-parser-microsoft-module).
-    string text = check extractText(DOCX_BYTES, "sample.docx");
+    [string, boolean] [text, _] = check extractText(DOCX_BYTES, "sample.docx", ());
     test:assertTrue(text.includes(DOCX_TEXT), text);
 }
 
 @test:Config {}
 isolated function testExtractTextFromXlsxBytes() returns error? {
     // .xlsx exercises the OOXML parser for a spreadsheet.
-    string text = check extractText(XLSX_BYTES, "sample.xlsx");
+    [string, boolean] [text, _] = check extractText(XLSX_BYTES, "sample.xlsx", ());
     test:assertTrue(text.includes(XLSX_TEXT), text);
 }
 
 @test:Config {}
 isolated function testExtractTextFromPptxBytes() returns error? {
     // .pptx exercises the OOXML parser for a presentation (and the embedded-object skip).
-    string text = check extractText(PPTX_BYTES, "sample.pptx");
+    [string, boolean] [text, _] = check extractText(PPTX_BYTES, "sample.pptx", ());
     test:assertTrue(text.includes(PPTX_TEXT), text);
 }
 
 @test:Config {}
 isolated function testExtractTextFromXlsBytes() returns error? {
     // Legacy .xls exercises the OLE2 OfficeParser for a spreadsheet.
-    string text = check extractText(XLS_BYTES, "sample.xls");
+    [string, boolean] [text, _] = check extractText(XLS_BYTES, "sample.xls", ());
     test:assertTrue(text.includes(XLS_TEXT), text);
 }
 
 @test:Config {}
 isolated function testExtractTextFromPptBytes() returns error? {
     // Legacy .ppt exercises the OLE2 OfficeParser for a presentation.
-    string text = check extractText(PPT_BYTES, "sample.ppt");
+    [string, boolean] [text, _] = check extractText(PPT_BYTES, "sample.ppt", ());
     test:assertTrue(text.includes(PPT_TEXT), text);
 }
 
