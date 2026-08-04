@@ -8,7 +8,7 @@
 > Describe how you are implementing the solutions. Include an animated GIF or screenshot if the change affects the UI (email documentation@wso2.com to review all UI text). Include a link to a Markdown file or Google doc if the feature write-up is too long to paste here.
 
 ## User stories
-> Summary of user stories addressed by this change>
+> Summary of user stories addressed by this change
 
 ## Release note
 > Brief description of the new feature or bug fix as it will appear in the release notes
@@ -32,7 +32,7 @@
    > Details about the test cases and coverage
 
 ## Security checks
- - Followed secure coding standards in http://wso2.com/technical-reports/wso2-secure-engineering-guidelines? yes/no
+ - Followed secure coding standards in https://wso2.com/technical-reports/wso2-secure-engineering-guidelines? yes/no
  - Ran FindSecurityBugs plugin and verified report? yes/no
  - Confirmed that this PR doesn't commit any keys, passwords, tokens, usernames, or other secrets? yes/no
 

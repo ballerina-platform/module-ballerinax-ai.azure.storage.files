@@ -1,0 +1,73 @@
+// Copyright (c) 2026, WSO2 LLC. (http://www.wso2.com).
+//
+// WSO2 LLC. licenses this file to you under the Apache License,
+// Version 2.0 (the "License"); you may not use this file except
+// in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+import ballerina/ai;
+import ballerinax/azure_storage_service.files;
+
+// Constructs the Azure Files `FileClient` (directory/file listing + download) from the
+// connector's `ConnectionConfig`, wrapping any construction failure as an `ai:Error`.
+// The connector builds its client from the credential itself, so a construction failure can
+// echo the configured `accessKeyOrSAS` back in its message — hence the redaction.
+isolated function newFileClient(files:ConnectionConfig config) returns files:FileClient|ai:Error {
+    files:FileClient|error fileClient = new (config);
+    if fileClient is error {
+        return error ai:Error(
+            string `Failed to initialize the Azure Files client: ${redactSecrets(fileClient.message())}`,
+            fileClient);
+    }
+    return fileClient;
+}
+
+// Constructs the Azure Files `ManagementClient` (used only to enumerate shares for a
+// `share: "*"` source via `listShares`), wrapping any construction failure as an `ai:Error`.
+isolated function newManagementClient(files:ConnectionConfig config) returns files:ManagementClient|ai:Error {
+    files:ManagementClient|error managementClient = new (config);
+    if managementClient is error {
+        return error ai:Error(
+            string `Failed to initialize the Azure Files management client: ` +
+                string `${redactSecrets(managementClient.message())}`,
+            managementClient);
+    }
+    return managementClient;
+}
+
+// Reports whether a connector error denotes a missing resource (share, directory, or file).
+// The `files` connector maps every HTTP 404 — regardless of the Azure error code
+// (`ShareNotFound`, `ResourceNotFound`, `ParentNotFound`, …) — to a distinct
+// `files:NotFoundError` (an `http:STATUS_NOT_FOUND` `ServerError`), so a single typed check
+// suffices.
+//
+// This holds only for the operations that call the connector's `checkAndHandleErrors`
+// (`getFileAsByteArray` among them). The *listing* operations do not: see `probeDirectory`.
+isolated function isNotFoundError(error err) returns boolean => err is files:NotFoundError;
+
+// Azure's error code for "the file you asked for is not there, but its parent is". Returned
+// for a `Get File` against a directory that exists.
+const string RESOURCE_NOT_FOUND_CODE = "ResourceNotFound";
+
+// Azure's error codes for "something above the file does not exist".
+const string PARENT_NOT_FOUND_CODE = "ParentNotFound";
+const string SHARE_NOT_FOUND_CODE = "ShareNotFound";
+
+// Reads the Azure error code (`ShareNotFound`, `AuthenticationFailed`, …) carried by a
+// connector error, or `()` when the error is not one the connector built from an Azure
+// response. Only `files:ServerError` and its sub-types carry the detail record.
+isolated function azureErrorCode(error err) returns string? {
+    if err is files:ServerError {
+        return err.detail().errorCode;
+    }
+    return ();
+}
