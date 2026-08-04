@@ -25,7 +25,7 @@ The acquisition layer — authentication, directory/file listing, and download �
 
 ## Authentication
 
-Azure Files is accessed through the `ballerinax/azure_storage_service.files` connector, and the loader is initialized directly with the connector's `files:ConnectionConfig` (or with existing connector clients — see [Reusing an existing client](#reusing-an-existing-client)). The connector supports two authorization mechanisms, configured through `accessKeyOrSAS` together with `authorizationMethod`:
+Azure Files is accessed through the `ballerinax/azure_storage_service.files` connector, and the loader is initialized directly with the connector's `files:ConnectionConfig`. The connector supports two authorization mechanisms, configured through `accessKeyOrSAS` together with `authorizationMethod`:
 
 | Mechanism | `authorizationMethod` | `accessKeyOrSAS` holds | Best for |
 | --- | --- | --- | --- |
@@ -106,32 +106,7 @@ final azureFiles:TextDataLoader loader = check new (
 );
 ```
 
-### Reusing an existing client
-
-If the application already holds a `files:FileClient`, pass it in place of the `files:ConnectionConfig` rather than having the loader construct a second one:
-
-```ballerina
-final files:FileClient fileClient = check new ({
-    accountName,
-    accessKeyOrSAS,
-    authorizationMethod: files:SAS
-});
-
-final azureFiles:TextDataLoader loader = check new ({fileClient}, [{share: "documents"}]);
-```
-
-This shares one connection pool across every loader (and any other connector use) built on that client. Clients supplied this way are **not** owned by the loader: the caller remains responsible for their lifecycle.
-
-The connector splits its API across two clients, so reading from **every** share (`share: "*"`) additionally needs a `files:ManagementClient` — that is what `listShares` lives on. Supply it alongside the file client:
-
-```ballerina
-final azureFiles:TextDataLoader loader = check new (
-    {fileClient, managementClient},
-    [{share: "*", paths: ["/shared"]}]
-);
-```
-
-`managementClient` is optional and may be omitted whenever no source uses `"*"`, mirroring the loader's own behaviour of constructing it lazily. Configuring a `"*"` source without one is reported as an error at initialization, since there is then no configuration from which to build it.
+The loader constructs and owns its connector clients. The connector splits its API across two of them — `files:FileClient` lists directories and downloads files, while `files:ManagementClient` exists only to enumerate the account's shares — so a `files:ManagementClient` is constructed **lazily**, only when some source uses `share: "*"`. A load that names its shares never opens a connection it will not use.
 
 ### The share / directory model
 
@@ -242,15 +217,6 @@ The connection configuration is the [`ballerinax/azure_storage_service.files`](h
 | `proxy` | `http:ProxyConfig` | — | Proxy server options |
 | `validation` | `boolean` | `true` | Inbound payload validation |
 
-
-### `Clients`
-
-Passed instead of a `files:ConnectionConfig` to reuse already-constructed connector clients (see [Reusing an existing client](#reusing-an-existing-client)). Neither client is owned by the loader.
-
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `fileClient` | `files:FileClient` | — | The client used to list directories and download files |
-| `managementClient` | `files:ManagementClient?` | — | Used only to enumerate shares for a `share: "*"` source. Required when any source uses `"*"`; may be omitted otherwise |
 
 ### `Source`
 
