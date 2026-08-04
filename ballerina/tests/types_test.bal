@@ -23,7 +23,7 @@ isolated function testSourceDefaults() {
     Source src = {share: "documents"};
     test:assertEquals(src.paths, ["/"], "paths defaults to the whole share");
     test:assertFalse(src.recursive, "recursive defaults to false");
-    test:assertTrue(src.includeExtensions is (), "includeExtensions defaults to () (all types)");
+    test:assertFalse(src.hasKey("includeExtensions"), "includeExtensions is absent by default (all types)");
 }
 
 @test:Config {}
@@ -37,7 +37,7 @@ isolated function testSourceExplicitValues() {
     test:assertEquals(src.share, "specs");
     test:assertEquals(src.paths.length(), 2);
     test:assertTrue(src.recursive);
-    test:assertEquals(src.includeExtensions, ["pdf", ".md"]);
+    test:assertEquals(src?.includeExtensions, ["pdf", ".md"]);
 }
 
 @test:Config {}
@@ -61,7 +61,7 @@ isolated function testFileEntryDefaults() {
 isolated function testFileEntryAtShareRoot() {
     FileEntry entry = {name: "readme.txt", directoryPath: "", contentLength: 42};
     test:assertEquals(entry.directoryPath, "", "A file at the share root has an empty directoryPath");
-    test:assertEquals(entry.contentLength, <decimal>42);
+    test:assertEquals(entry.contentLength, 42);
 }
 
 @test:Config {}
@@ -69,11 +69,11 @@ isolated function testSourceMaxFileSizeDefault() {
     // Every file is buffered whole in memory before extraction, so the default bound is what
     // stops one oversized file in a share from exhausting the heap.
     Source src = {share: "documents"};
-    test:assertEquals(src.maxFileSizeInBytes, <decimal>104857600, "Defaults to 100 MiB");
+    test:assertEquals(src.maxFileSizeInBytes, 104857600, "Defaults to 100 MiB");
 }
 
 @test:Config {}
 isolated function testSourceMaxFileSizeIsConfigurable() {
     Source src = {share: "documents", maxFileSizeInBytes: 1024};
-    test:assertEquals(src.maxFileSizeInBytes, <decimal>1024);
+    test:assertEquals(src.maxFileSizeInBytes, 1024);
 }

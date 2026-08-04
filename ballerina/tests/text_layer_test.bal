@@ -82,6 +82,21 @@ isolated function testClassifyMimeTypeBeatsExtension() {
 }
 
 @test:Config {}
+isolated function testClassifyIgnoresMimeTypeParameters() {
+    // A MIME value may carry parameters, and a well-configured server sends them. The
+    // allowlists hold bare media types, so the parameters have to be stripped before the
+    // comparison — otherwise an extensionless file falls through to UNSUPPORTED, and a
+    // parameterised OOXML type reaches the extractor's PDF-parser default.
+    test:assertEquals(classify("noext", "application/json; charset=utf-8"), PLAIN_TEXT);
+    test:assertEquals(classify("noext", "text/plain;charset=UTF-8"), PLAIN_TEXT);
+    test:assertEquals(
+        classify("noext", "application/vnd.openxmlformats-officedocument.wordprocessingml.document; charset=utf-8"),
+        EXTRACTABLE);
+    test:assertEquals(classify("noext", " application/pdf ; version=1.7 "), EXTRACTABLE,
+            "Surrounding whitespace is tolerated alongside the parameters");
+}
+
+@test:Config {}
 isolated function testClassifyFallsBackToExtensionForUnknownMimeType() {
     // A MIME type this module does not know says nothing useful — Azure labels plenty of
     // files `application/octet-stream` — so the extension still gets its say.
@@ -189,6 +204,16 @@ isolated function testIsNoExtractableTextErrorRejectsOtherErrors() {
 isolated function testExtractTextFromDocxBytes() returns error? {
     // The .docx path exercises the POI-backed OOXML parser (tika-parser-microsoft-module).
     [string, boolean] [text, _] = check extractText(DOCX_BYTES, "sample.docx", ());
+    test:assertTrue(text.includes(DOCX_TEXT), text);
+}
+
+@test:Config {}
+isolated function testExtractTextSelectsParserFromParameterizedMimeType() returns error? {
+    // No extension to fall back on, so the parameterised MIME value alone has to select the
+    // OOXML parser. Left unnormalized it misses the lookup and the file reaches the PDF
+    // parser default, which cannot read a .docx at all.
+    [string, boolean] [text, _] = check extractText(DOCX_BYTES, "sample",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document; charset=utf-8");
     test:assertTrue(text.includes(DOCX_TEXT), text);
 }
 

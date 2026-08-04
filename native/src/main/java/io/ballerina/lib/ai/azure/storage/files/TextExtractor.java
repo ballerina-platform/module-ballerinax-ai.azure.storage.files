@@ -189,7 +189,15 @@ public final class TextExtractor {
             // everything read up to the limit, so return that rather than failing the file:
             // a truncated document is more useful to a knowledge base than none. The caller
             // logs a warning off the flag, since the text alone does not reveal the loss.
-            return extractionResult(handler.toString(), true);
+            //
+            // The retained prefix is still held to the textless check below: a document whose
+            // first ten million characters are all whitespace has no more content to offer
+            // than a short empty one, and must not become an ai:TextDocument either.
+            String truncated = handler.toString();
+            if (truncated.trim().isEmpty()) {
+                return textlessError(parser);
+            }
+            return extractionResult(truncated, true);
         } catch (EncryptedDocumentException | org.apache.poi.EncryptedDocumentException e) {
             // Password-protected files are common on shared drives and the generic Tika
             // message for them is opaque, so report the cause the user can act on.
@@ -204,10 +212,18 @@ public final class TextExtractor {
         // with empty content, which is then chunked and embedded into the vector store as a
         // meaningless vector. Surface a descriptive error instead and let the loader skip it.
         if (text.trim().isEmpty()) {
-            return ErrorCreator.createError(StringUtils.fromString(
-                    parser instanceof PDFParser ? TEXTLESS_PDF_MESSAGE : TEXTLESS_DOCUMENT_MESSAGE));
+            return textlessError(parser);
         }
         return extractionResult(text, false);
+    }
+
+    /**
+     * Builds the error for a document that parsed successfully but holds no text, worded for
+     * the format the parser identifies (a PDF may simply have no text layer).
+     */
+    private static Object textlessError(Parser parser) {
+        return ErrorCreator.createError(StringUtils.fromString(
+                parser instanceof PDFParser ? TEXTLESS_PDF_MESSAGE : TEXTLESS_DOCUMENT_MESSAGE));
     }
 
     /** Builds the {@code [text, truncated]} tuple returned to the Ballerina layer. */
@@ -354,7 +370,7 @@ public final class TextExtractor {
      */
     private static Parser selectParser(String fileName, String mimeType) {
         if (mimeType != null) {
-            String mime = mimeType.toLowerCase(Locale.ROOT);
+            String mime = normalizeMimeType(mimeType);
             if (OOXML_MIME_TYPES.contains(mime)) {
                 return new OOXMLParser();
             }
@@ -373,6 +389,21 @@ public final class TextExtractor {
             return new OfficeParser();
         }
         return new PDFParser();
+    }
+
+    /**
+     * Reduces a MIME value to its bare, lower-cased media type.
+     *
+     * <p>A MIME value may legitimately carry parameters — {@code application/vnd.openxmlformats-
+     * officedocument.wordprocessingml.document; charset=utf-8} — while the sets above hold bare
+     * media types only. Matching the whole value would drop a parameterised OOXML type through
+     * to the {@link PDFParser} default. Mirrors {@code mediaType} in {@code utils.bal}; keep
+     * the two in sync.
+     */
+    private static String normalizeMimeType(String mimeType) {
+        String value = mimeType.trim().toLowerCase(Locale.ROOT);
+        int separator = value.indexOf(';');
+        return separator < 0 ? value : value.substring(0, separator).trim();
     }
 
     /**

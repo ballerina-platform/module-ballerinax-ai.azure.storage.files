@@ -126,7 +126,7 @@ isolated function isNoExtractableTextError(error err) returns boolean =>
 // extension override it would classify `report.txt` served as `application/pdf` as plain text
 // and hand a PDF's bytes to the text decoder.
 isolated function classify(string fileName, string? mimeType) returns DocumentKind {
-    string mime = (mimeType ?: "").toLowerAscii();
+    string mime = mediaType(mimeType);
     if mime != "" {
         if mime.startsWith("text/") || TEXT_MIME_TYPES.indexOf(mime) !is () {
             return PLAIN_TEXT;
@@ -146,6 +146,20 @@ isolated function classify(string fileName, string? mimeType) returns DocumentKi
     return UNSUPPORTED;
 }
 
+// Reduces a MIME value to its bare, lower-cased media type, or `""` when there is none.
+//
+// A MIME value may legitimately carry parameters — `application/json; charset=utf-8` is what
+// a well-configured server sends — and both this module's allowlists and the native
+// extractor's parser table hold bare media types only. Matching the whole value would leave
+// an extensionless `application/json; charset=utf-8` file classified `UNSUPPORTED`, and drop
+// a parameterised OOXML type through to the extractor's `PDFParser` default. Mirrors
+// `TextExtractor.normalizeMimeType`; keep the two in sync.
+isolated function mediaType(string? mimeType) returns string {
+    string value = (mimeType ?: "").trim().toLowerAscii();
+    int? separator = value.indexOf(";");
+    return separator is int ? value.substring(0, separator).trim() : value;
+}
+
 // Returns the lower-cased file extension (without the dot), or `""` if none.
 isolated function getExtension(string fileName) returns string {
     int? lastDotIndex = fileName.lastIndexOf(".");
@@ -155,7 +169,7 @@ isolated function getExtension(string fileName) returns string {
     return fileName.substring(lastDotIndex + 1).toLowerAscii();
 }
 
-// Reports whether a file passes the extension allowlist (`()`/empty matches all).
+// Reports whether a file passes the extension allowlist (absent/empty matches all).
 isolated function matchesExtensionFilter(string fileName, string[]? includeExtensions) returns boolean {
     if includeExtensions is () || includeExtensions.length() == 0 {
         return true;

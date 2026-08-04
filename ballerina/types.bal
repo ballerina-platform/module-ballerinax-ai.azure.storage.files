@@ -29,8 +29,8 @@ public type Source record {|
     # Whether sub-directories under a directory are traversed. Defaults to `false`.
     boolean recursive = false;
     # Case-insensitive extension allowlist for directory listings.
-    # Defaults to `()`, all types.
-    string[]? includeExtensions = ();
+    # When not specified, all types are loaded.
+    string[] includeExtensions?;
     # The largest file, in bytes, that will be downloaded and converted. A listed file whose
     # reported size exceeds this is skipped with a warning instead of being fetched.
     #
@@ -38,7 +38,7 @@ public type Source record {|
     # allows files up to 4 TiB, so this bound is what keeps one oversized file in a share
     # from exhausting the heap. Defaults to 100 MiB, comfortably above any document worth
     # embedding. A file named explicitly in `paths` is subject to the same limit.
-    decimal maxFileSizeInBytes = 104857600;
+    int maxFileSizeInBytes = 104857600;
 |};
 
 // A normalized listing entry, decoupled from the connector's `File` record (whose
@@ -59,5 +59,5 @@ type FileEntry record {|
     # or `reports/2026`); `""` for the share root.
     string directoryPath;
     # The file's size in bytes, if reported (`Content-Length`).
-    decimal? contentLength = ();
+    int? contentLength = ();
 |};

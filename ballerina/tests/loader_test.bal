@@ -78,9 +78,9 @@ isolated function testToFileEntriesArrayWithContentLength() {
     test:assertEquals(entries.length(), 2);
     test:assertEquals(entries[0].name, "a.txt");
     test:assertEquals(entries[0].directoryPath, "reports", "the listing directory is recorded on each entry");
-    test:assertEquals(entries[0].contentLength, <decimal>12);
+    test:assertEquals(entries[0].contentLength, 12);
     test:assertEquals(entries[1].name, "b.pdf");
-    test:assertEquals(entries[1].contentLength, <decimal>2048);
+    test:assertEquals(entries[1].contentLength, 2048);
 }
 
 @test:Config {}
@@ -91,7 +91,7 @@ isolated function testToFileEntriesSingleFileNormalizedToArray() {
     test:assertEquals(entries.length(), 1);
     test:assertEquals(entries[0].name, "only.md");
     test:assertEquals(entries[0].directoryPath, "", "a share-root listing has an empty directory path");
-    test:assertEquals(entries[0].contentLength, <decimal>5);
+    test:assertEquals(entries[0].contentLength, 5);
 }
 
 @test:Config {}

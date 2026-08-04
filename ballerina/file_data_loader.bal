@@ -127,7 +127,7 @@ public isolated class TextDataLoader {
             // The size of a path named directly is not known until it has been fetched: the
             // connector exposes no properties/HEAD call, so unlike a listed file this one can
             // only be rejected after the download. The limit still bounds extraction.
-            if <decimal>content.length() > src.maxFileSizeInBytes {
+            if content.length() > src.maxFileSizeInBytes {
                 return error ai:Error(string `File '${rawPath}' in share '${share}' is ` +
                     string `${content.length()} bytes, which exceeds the configured ` +
                     string `'maxFileSizeInBytes' of ${src.maxFileSizeInBytes}`);
@@ -173,13 +173,13 @@ public isolated class TextDataLoader {
 
         ai:Document[] documents = [];
         foreach FileEntry entry in entries {
-            if !matchesExtensionFilter(entry.name, src.includeExtensions) {
+            if !matchesExtensionFilter(entry.name, src?.includeExtensions) {
                 continue;
             }
             // The listing reports each file's size, so an oversized file is rejected before
             // it is fetched — the whole body is otherwise held in memory at once.
-            decimal? contentLength = entry.contentLength;
-            if contentLength is decimal && contentLength > src.maxFileSizeInBytes {
+            int? contentLength = entry.contentLength;
+            if contentLength is int && contentLength > src.maxFileSizeInBytes {
                 log:printWarn("Skipping an Azure Files file larger than 'maxFileSizeInBytes'",
                         fileName = entry.name, directory = directoryPath, share = share,
                         fileSize = contentLength, maxFileSizeInBytes = src.maxFileSizeInBytes);
@@ -194,7 +194,7 @@ public isolated class TextDataLoader {
                 return content;
             }
             ai:TextDocument?|ai:Error document = buildDocument(content, entry.name, (),
-                    entry.contentLength ?: <decimal>content.length(), (), ());
+                    <decimal>(entry.contentLength ?: content.length()), (), ());
             if document is ai:Error {
                 // The file was fetched but its bytes could not be turned into text: a
                 // scanned PDF, a password-protected or corrupt Office file, a mislabeled
@@ -388,7 +388,7 @@ isolated function toFileEntries(files:FileList fileList, string directoryPath) r
 
 // Reads a listed file's `Content-Length`, or `()` when absent. Azure Files reports the size
 // as a string, and the connector types the property block as `PropertiesFileItem|""`.
-isolated function contentLengthOf(files:File file) returns decimal? {
+isolated function contentLengthOf(files:File file) returns int? {
     files:PropertiesFileItem|string? properties = file?.Properties;
     if properties !is files:PropertiesFileItem {
         return ();
@@ -397,8 +397,8 @@ isolated function contentLengthOf(files:File file) returns decimal? {
     if contentLength is () {
         return ();
     }
-    decimal|error parsed = decimal:fromString(contentLength.trim());
-    return parsed is decimal ? parsed : ();
+    int|error parsed = int:fromString(contentLength.trim());
+    return parsed is int ? parsed : ();
 }
 
 // Extracts the sub-directory names from a connector `DirectoryList`, normalizing its

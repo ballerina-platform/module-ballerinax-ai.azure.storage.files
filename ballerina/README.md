@@ -140,7 +140,7 @@ Each `Source` has its own `includeExtensions` to restrict which files are loaded
 
 - `includeExtensions: ["pdf"]` — only PDF files.
 - `includeExtensions: ["pdf", ".md", "TXT"]` — case-insensitive; a leading dot is optional.
-- omitted / `()` (the default) — load all types.
+- omitted (the default) — load all types.
 
 The filter applies to files discovered while listing a directory. A file listed **explicitly** in `paths` is always loaded, even if its extension isn't in the list.
 
@@ -229,5 +229,5 @@ The connection configuration is the [`ballerinax/azure_storage_service.files`](h
 | `share` | `string` | — | The share name to read from, or `"*"` for every share in the account |
 | `paths` | `string[]` | `["/"]` | Directory paths and/or explicit file names. The default `["/"]` loads the whole share; `[]` loads nothing |
 | `recursive` | `boolean` | `false` | Whether directories are traversed into sub-directories |
-| `includeExtensions` | `string[]?` | `()` | Extension allowlist applied to directory contents (e.g. `["pdf"]`). Case-insensitive; `()` loads all types. Explicit file paths bypass it |
-| `maxFileSizeInBytes` | `decimal` | `104857600` (100 MiB) | Largest file that will be downloaded and converted. A listed file whose reported size exceeds this is skipped with a warning before it is fetched |
+| `includeExtensions` | `string[]?` | absent | Extension allowlist applied to directory contents (e.g. `["pdf"]`). Case-insensitive; when absent, all types are loaded. Explicit file paths bypass it |
+| `maxFileSizeInBytes` | `int` | `104857600` (100 MiB) | Largest file that will be downloaded and converted. A listed file whose reported size exceeds this is skipped with a warning before it is fetched |
