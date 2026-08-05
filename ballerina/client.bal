@@ -62,6 +62,32 @@ const string RESOURCE_NOT_FOUND_CODE = "ResourceNotFound";
 const string PARENT_NOT_FOUND_CODE = "ParentNotFound";
 const string SHARE_NOT_FOUND_CODE = "ShareNotFound";
 
+// The byte range a size-bounded download asks for: byte 0 through `maxFileSizeInBytes`
+// *inclusive*, which is one byte more than the limit permits. That extra byte is deliberate —
+// it is what makes "the file fits" and "the file is too large" distinguishable from the length
+// of what came back, without ever reading further into an oversized file (see
+// `TextDataLoader.downloadBounded`).
+isolated function boundedRange(int maxFileSizeInBytes) returns files:ContentRange =>
+    {startByte: 0, endByte: maxFileSizeInBytes};
+
+// Azure's answer (HTTP 416) to a byte range that does not exist in the file.
+const string INVALID_RANGE_CODE = "InvalidRange";
+const int STATUS_RANGE_NOT_SATISFIABLE = 416;
+
+// Reports whether a connector error is Azure's "that range is not satisfiable" answer.
+//
+// The loader only ever asks for a range starting at byte 0 (see `downloadBounded`), and the
+// sole file without a byte 0 is an empty one, so this identifies a zero-length file. The
+// status is checked alongside the code because `checkAndHandleErrors` falls back to a generic
+// `ServerError` with `errorCode = "Undefined"` when the 416 body is not XML it can parse.
+isolated function isInvalidRangeError(error err) returns boolean {
+    if err !is files:ServerError {
+        return false;
+    }
+    files:ServerErrorDetail detail = err.detail();
+    return detail.errorCode == INVALID_RANGE_CODE || detail.httpStatus == STATUS_RANGE_NOT_SATISFIABLE;
+}
+
 // Reads the Azure error code (`ShareNotFound`, `AuthenticationFailed`, …) carried by a
 // connector error, or `()` when the error is not one the connector built from an Azure
 // response. Only `files:ServerError` and its sub-types carry the detail record.

@@ -36,15 +36,20 @@ public isolated class TextDataLoader {
     # + azureConnection - The authentication and service configuration shared by all sources
     # + sources - One or more Azure Files shares to load documents from
     # + maxFileSizeInBytes - The largest file, in bytes, that will be downloaded and converted.
-    #                        A listed file whose reported size exceeds this is skipped with a
-    #                        warning instead of being fetched.
-    #
     #                        Every file is read fully into memory before its text is extracted,
     #                        and Azure Files allows files up to 4 TiB, so this bound is what
     #                        keeps one oversized file in a share from exhausting the heap.
     #                        Defaults to 100 MiB, comfortably above any document worth
-    #                        embedding. A file named explicitly in `paths` is subject to the
-    #                        same limit.
+    #                        embedding.
+    #
+    #                        An oversized file is reported differently depending on how it was
+    #                        reached. A file found by listing a directory is skipped with a
+    #                        warning — before it is fetched at all when the listing reports a
+    #                        size over the limit, and after an attempted read otherwise. A file
+    #                        named explicitly in `paths` is an error instead, since it was asked
+    #                        for by name; it is read before being rejected, because a named path
+    #                        has no listing to consult. Neither case reads more than one byte
+    #                        past the limit: the download itself is bounded by a byte range.
     # + return - An `ai:Error` if the loader could not be initialized
     public isolated function init(
             @display {label: "Azure Connection"} files:ConnectionConfig azureConnection,
@@ -139,16 +144,16 @@ public isolated class TextDataLoader {
 
         // Ambiguous file-or-directory path: probe for an exact file first.
         [string, string] [directoryPath, fileName] = splitPath(normalized);
-        byte[]|files:Error content = self.fileClient->getFileAsByteArray(share, fileName,
+        byte[]|files:Error content = self.downloadBounded(share, fileName,
                 directoryPath == "" ? () : directoryPath);
         if content is byte[] {
-            // The size of a path named directly is not known until it has been fetched: the
+            // The size of a path named directly is not known until it has been read: the
             // connector exposes no properties/HEAD call, so unlike a listed file this one can
-            // only be rejected after the download. The limit still bounds extraction.
+            // only be rejected after the request. The read stops one byte past the limit, so
+            // "longer than the limit" is what a full buffer means here, not what it cost.
             if content.length() > self.maxFileSizeInBytes {
-                return error ai:Error(string `File '${rawPath}' in share '${share}' is ` +
-                    string `${content.length()} bytes, which exceeds the configured ` +
-                    string `'maxFileSizeInBytes' of ${self.maxFileSizeInBytes}`);
+                return error ai:Error(string `File '${rawPath}' in share '${share}' exceeds the ` +
+                    string `configured 'maxFileSizeInBytes' of ${self.maxFileSizeInBytes}`);
             }
             // An explicitly named file is always loaded, regardless of the extension filter.
             // A deliberately named non-text file is an error, unlike directory contents.
@@ -194,8 +199,8 @@ public isolated class TextDataLoader {
             if !matchesExtensionFilter(entry.name, src?.includeExtensions) {
                 continue;
             }
-            // The listing reports each file's size, so an oversized file is rejected before
-            // it is fetched — the whole body is otherwise held in memory at once.
+            // When the listing reports a size over the limit, the file is dropped without a
+            // request at all — the cheapest of the two rejections, and the common one.
             int? contentLength = entry.contentLength;
             if contentLength is int && contentLength > self.maxFileSizeInBytes {
                 log:printWarn("Skipping an Azure Files file larger than 'maxFileSizeInBytes'",
@@ -210,6 +215,19 @@ public isolated class TextDataLoader {
                 // vanished file), not a property of the content, so it aborts the walk
                 // rather than quietly shrinking the result set.
                 return content;
+            }
+            // A listing's size is a claim, not a measurement: `Content-Length` is optional in
+            // the response, and an SMB or NFS client can grow a file without the listing
+            // catching up. So the limit is applied again to what actually arrived — otherwise
+            // a missing or under-reported size would walk an arbitrarily large file straight
+            // past the check above. `downloadBounded` stops one byte beyond the limit, so a
+            // buffer longer than it means the file is larger, and nothing more was read.
+            if content.length() > self.maxFileSizeInBytes {
+                log:printWarn("Skipping an Azure Files file larger than 'maxFileSizeInBytes'; " +
+                        "its listed size was missing or understated the file",
+                        fileName = entry.name, directory = directoryPath, share = share,
+                        listedFileSize = contentLength, maxFileSizeInBytes = self.maxFileSizeInBytes);
+                continue;
             }
             ai:TextDocument?|ai:Error document = buildDocument(content, entry.name, (),
                     <decimal>(entry.contentLength ?: content.length()), (), ());
@@ -348,12 +366,38 @@ public isolated class TextDataLoader {
     // the caller can tell a transport failure (which must abort the walk) from content that
     // simply cannot be turned into text (which is skipped).
     private isolated function downloadFile(string share, FileEntry entry) returns byte[]|ai:Error {
-        byte[]|files:Error content = self.fileClient->getFileAsByteArray(share, entry.name,
+        byte[]|files:Error content = self.downloadBounded(share, entry.name,
                 entry.directoryPath == "" ? () : entry.directoryPath);
         if content is files:Error {
             return error ai:Error(string `Failed to download file '${entry.name}' from directory ` +
                 string `'${entry.directoryPath}' of share '${share}': ` +
                 string `${redactSecrets(content.message())}`, content);
+        }
+        return content;
+    }
+
+    // Reads a file, never taking in more than one byte beyond `maxFileSizeInBytes`.
+    //
+    // Azure's `Get File` honours a byte range and the connector passes one through, so the
+    // limit can be imposed on the wire rather than on a body already buffered: asking for
+    // `bytes=0-limit` returns the whole file when it fits, and exactly `limit + 1` bytes when
+    // it does not. That single extra byte is what tells the two apart, and it is the entire
+    // cost of discovering a 4 TiB file. The bound therefore holds without trusting any
+    // reported size — the listing's `Content-Length` is optional and can be stale, and a path
+    // named in `paths` has no listing behind it at all.
+    //
+    // Errors are returned as the connector's own `files:Error`, since callers still need to
+    // tell a missing file from a transport failure.
+    private isolated function downloadBounded(string share, string fileName, string? directoryPath)
+            returns byte[]|files:Error {
+        byte[]|files:Error content = self.fileClient->getFileAsByteArray(share, fileName, directoryPath,
+                boundedRange(self.maxFileSizeInBytes));
+        if content is files:Error && isInvalidRangeError(content) {
+            // An empty file has no byte 0 for the range to start at, so Azure rejects the
+            // request outright. It is the one file that has to be fetched unbounded — and the
+            // only one for which that is free, because the rejection itself proves it holds
+            // nothing.
+            return self.fileClient->getFileAsByteArray(share, fileName, directoryPath);
         }
         return content;
     }

@@ -107,15 +107,33 @@ final azureFiles:TextDataLoader loader = check new (
 ```
 
 A third, optional parameter — `maxFileSizeInBytes` — bounds how large a file may be before the
-loader will download and convert it. It applies to every source and defaults to 100 MiB:
+loader will convert it. It applies to every source and defaults to 100 MiB:
 
 ```ballerina
+final files:ConnectionConfig connectionConfig = {
+    accountName,
+    accessKeyOrSAS,
+    authorizationMethod: files:SAS
+};
+
 final azureFiles:TextDataLoader smallFilesOnly = check new (
     connectionConfig,
     [{share: "documents", recursive: true}],
     10 * 1024 * 1024
 );
 ```
+
+An oversized file is reported differently depending on how the loader reached it:
+
+- **Found by listing a directory** — skipped with a `WARN`, so one huge file cannot fail a bulk
+  ingestion run. When the listing reports a size over the limit the file is never requested at
+  all; when the listing reports no size (the property is optional) or understates it, the read
+  itself is cut short and the file is skipped then.
+- **Named explicitly in `paths`** — an **error**, since it was asked for by name. Such a path
+  has no listing to consult, so it is read before being rejected.
+
+Either way the loader reads at most one byte past the limit: the download is issued as a byte
+range, so an oversized file is identified without ever being held in memory whole.
 
 The loader constructs and owns its connector clients. The connector splits its API across two of them — `files:FileClient` lists directories and downloads files, while `files:ManagementClient` exists only to enumerate the account's shares — so a `files:ManagementClient` is constructed **lazily**, only when some source uses `share: "*"`. A load that names its shares never opens a connection it will not use.
 
@@ -180,8 +198,10 @@ Each returned `ai:TextDocument` carries metadata including the file name (`fileN
   `Get File` probe — which *does* report status — and turns a rejected request into an error
   instead of an empty result. The cost is one additional request per empty directory.
 - **No content type from listings.** As noted above, classification is extension-based.
-- **A file larger than `maxFileSizeInBytes` is skipped.** Files are buffered whole in memory
-  before extraction, so the default 100 MiB bound protects the process. Raise it deliberately.
+- **A file larger than `maxFileSizeInBytes` is not converted.** Files are buffered whole in
+  memory before extraction, so the default 100 MiB bound protects the process. Raise it
+  deliberately. A file discovered in a directory listing is skipped with a `WARN`; one named
+  explicitly in `paths` is reported as an error.
 - **Text extraction failures are skipped, not fatal.** A password-protected, corrupt, or
   mislabeled file inside a directory listing is logged at `WARN` and skipped so that one bad
   file cannot abort a bulk ingestion run. A path named explicitly in `paths` still errors.
@@ -248,4 +268,4 @@ The connection configuration is the [`ballerinax/azure_storage_service.files`](h
 | --- | --- | --- | --- |
 | `azureConnection` | `files:ConnectionConfig` | — | The authentication and service configuration shared by all sources |
 | `sources` | `Source[]` | — | One or more Azure Files shares to load documents from; at least one is required |
-| `maxFileSizeInBytes` | `int` | `104857600` (100 MiB) | Largest file that will be downloaded and converted, applied across every source. A listed file whose reported size exceeds this is skipped with a warning before it is fetched. Must be positive |
+| `maxFileSizeInBytes` | `int` | `104857600` (100 MiB) | Largest file that will be converted, applied across every source. A file found in a directory listing is skipped with a warning — before it is fetched when the listing reports an oversized `Content-Length`, and after a bounded read when that size is absent or understated. A file named explicitly in `paths` is read (up to one byte past the limit) and then reported as an error. Must be positive |
