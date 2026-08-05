@@ -29,19 +29,37 @@ public isolated class TextDataLoader {
     // Only constructed when a source uses `share: "*"` (share enumeration); `()` otherwise.
     private final files:ManagementClient? managementClient;
     private final readonly & Source[] sources;
+    private final int maxFileSizeInBytes;
 
     # Initializes the Azure Files data loader.
     #
     # + azureConnection - The authentication and service configuration shared by all sources
     # + sources - One or more Azure Files shares to load documents from
+    # + maxFileSizeInBytes - The largest file, in bytes, that will be downloaded and converted.
+    #                        A listed file whose reported size exceeds this is skipped with a
+    #                        warning instead of being fetched.
+    #
+    #                        Every file is read fully into memory before its text is extracted,
+    #                        and Azure Files allows files up to 4 TiB, so this bound is what
+    #                        keeps one oversized file in a share from exhausting the heap.
+    #                        Defaults to 100 MiB, comfortably above any document worth
+    #                        embedding. A file named explicitly in `paths` is subject to the
+    #                        same limit.
     # + return - An `ai:Error` if the loader could not be initialized
     public isolated function init(
             @display {label: "Azure Connection"} files:ConnectionConfig azureConnection,
-            @display {label: "Data Sources"} Source[] sources) returns ai:Error? {
+            @display {label: "Data Sources"} Source[] sources,
+            @display {label: "Maximum File Size (Bytes)"} int maxFileSizeInBytes = 104857600)
+            returns ai:Error? {
         if sources.length() == 0 {
             return error ai:Error("At least one source must be provided to the Azure Files data loader");
         }
+        if maxFileSizeInBytes <= 0 {
+            return error ai:Error(string `'maxFileSizeInBytes' must be a positive number of bytes, ` +
+                string `but found ${maxFileSizeInBytes}`);
+        }
         self.sources = sources.cloneReadOnly();
+        self.maxFileSizeInBytes = maxFileSizeInBytes;
         // The management client is only needed to enumerate shares for a `"*"` source, so it
         // is built lazily: a load that names its shares never opens a connection it will not use.
         boolean needsManagement = false;
@@ -127,10 +145,10 @@ public isolated class TextDataLoader {
             // The size of a path named directly is not known until it has been fetched: the
             // connector exposes no properties/HEAD call, so unlike a listed file this one can
             // only be rejected after the download. The limit still bounds extraction.
-            if content.length() > src.maxFileSizeInBytes {
+            if content.length() > self.maxFileSizeInBytes {
                 return error ai:Error(string `File '${rawPath}' in share '${share}' is ` +
                     string `${content.length()} bytes, which exceeds the configured ` +
-                    string `'maxFileSizeInBytes' of ${src.maxFileSizeInBytes}`);
+                    string `'maxFileSizeInBytes' of ${self.maxFileSizeInBytes}`);
             }
             // An explicitly named file is always loaded, regardless of the extension filter.
             // A deliberately named non-text file is an error, unlike directory contents.
@@ -179,10 +197,10 @@ public isolated class TextDataLoader {
             // The listing reports each file's size, so an oversized file is rejected before
             // it is fetched — the whole body is otherwise held in memory at once.
             int? contentLength = entry.contentLength;
-            if contentLength is int && contentLength > src.maxFileSizeInBytes {
+            if contentLength is int && contentLength > self.maxFileSizeInBytes {
                 log:printWarn("Skipping an Azure Files file larger than 'maxFileSizeInBytes'",
                         fileName = entry.name, directory = directoryPath, share = share,
-                        fileSize = contentLength, maxFileSizeInBytes = src.maxFileSizeInBytes);
+                        fileSize = contentLength, maxFileSizeInBytes = self.maxFileSizeInBytes);
                 continue;
             }
 

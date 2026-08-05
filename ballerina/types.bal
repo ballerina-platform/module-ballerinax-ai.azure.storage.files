@@ -31,14 +31,6 @@ public type Source record {|
     # Case-insensitive extension allowlist for directory listings.
     # When not specified, all types are loaded.
     string[] includeExtensions?;
-    # The largest file, in bytes, that will be downloaded and converted. A listed file whose
-    # reported size exceeds this is skipped with a warning instead of being fetched.
-    #
-    # Every file is read fully into memory before its text is extracted, and Azure Files
-    # allows files up to 4 TiB, so this bound is what keeps one oversized file in a share
-    # from exhausting the heap. Defaults to 100 MiB, comfortably above any document worth
-    # embedding. A file named explicitly in `paths` is subject to the same limit.
-    int maxFileSizeInBytes = 104857600;
 |};
 
 // A normalized listing entry, decoupled from the connector's `File` record (whose

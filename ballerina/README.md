@@ -106,6 +106,17 @@ final azureFiles:TextDataLoader loader = check new (
 );
 ```
 
+A third, optional parameter — `maxFileSizeInBytes` — bounds how large a file may be before the
+loader will download and convert it. It applies to every source and defaults to 100 MiB:
+
+```ballerina
+final azureFiles:TextDataLoader smallFilesOnly = check new (
+    connectionConfig,
+    [{share: "documents", recursive: true}],
+    10 * 1024 * 1024
+);
+```
+
 The loader constructs and owns its connector clients. The connector splits its API across two of them — `files:FileClient` lists directories and downloads files, while `files:ManagementClient` exists only to enumerate the account's shares — so a `files:ManagementClient` is constructed **lazily**, only when some source uses `share: "*"`. A load that names its shares never opens a connection it will not use.
 
 ### The share / directory model
@@ -230,4 +241,11 @@ The connection configuration is the [`ballerinax/azure_storage_service.files`](h
 | `paths` | `string[]` | `["/"]` | Directory paths and/or explicit file names. The default `["/"]` loads the whole share; `[]` loads nothing |
 | `recursive` | `boolean` | `false` | Whether directories are traversed into sub-directories |
 | `includeExtensions` | `string[]?` | absent | Extension allowlist applied to directory contents (e.g. `["pdf"]`). Case-insensitive; when absent, all types are loaded. Explicit file paths bypass it |
-| `maxFileSizeInBytes` | `int` | `104857600` (100 MiB) | Largest file that will be downloaded and converted. A listed file whose reported size exceeds this is skipped with a warning before it is fetched |
+
+### `TextDataLoader` initialization parameters
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `azureConnection` | `files:ConnectionConfig` | — | The authentication and service configuration shared by all sources |
+| `sources` | `Source[]` | — | One or more Azure Files shares to load documents from; at least one is required |
+| `maxFileSizeInBytes` | `int` | `104857600` (100 MiB) | Largest file that will be downloaded and converted, applied across every source. A listed file whose reported size exceeds this is skipped with a warning before it is fetched. Must be positive |

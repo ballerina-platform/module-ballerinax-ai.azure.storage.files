@@ -193,6 +193,24 @@ isolated function testInitConstructsForWildcardShare() returns error? {
 }
 
 @test:Config {}
+isolated function testInitRejectsNonPositiveMaxFileSize() {
+    // A zero or negative bound would silently skip every file, so it is rejected at init.
+    files:ConnectionConfig config = {accountName: "acct", accessKeyOrSAS: "token", authorizationMethod: files:SAS};
+    TextDataLoader|error loader = new (config, [{share: "documents"}], 0);
+    test:assertTrue(loader is error, "'maxFileSizeInBytes' must be positive");
+}
+
+@test:Config {}
+isolated function testInitAcceptsCustomMaxFileSize() returns error? {
+    files:ConnectionConfig config = {
+        accountName: "contosostorage",
+        accessKeyOrSAS: "sv=2022-11-02&ss=f&srt=co&sp=rl&sig=abc",
+        authorizationMethod: files:SAS
+    };
+    TextDataLoader _ = check new (config, [{share: "documents"}], 1024);
+}
+
+@test:Config {}
 isolated function testInitReportsEmptySourcesAsAiError() {
     // The source check runs before any client is constructed, so it is reported as a typed
     // `ai:Error` with an actionable message rather than a connector failure.
