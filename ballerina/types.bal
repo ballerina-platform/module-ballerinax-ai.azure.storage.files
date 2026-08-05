@@ -20,8 +20,7 @@
 # Blob's flat namespace, an Azure Files share is a real `Directory → File` tree, so paths
 # address genuine directories and files rather than blob-name prefixes.
 public type Source record {|
-    # The share name to read from, or `"*"` for every share in the account.
-    # For `"*"`, a missing path is tolerated (skipped) rather than an error.
+    # The share name to read from.
     string share;
     # Directory or file paths (e.g. `/reports`, `/design.md`) to read.
     # Defaults to `["/"]`, the whole share; `[]` reads nothing.

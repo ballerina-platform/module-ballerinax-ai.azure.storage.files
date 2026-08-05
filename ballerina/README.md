@@ -10,7 +10,7 @@ The acquisition layer — authentication, directory/file listing, and download �
 
 - Reads files from one or more Azure Files **shares** in a storage account.
 - Loads individual files as well as entire **directories**, optionally recursively.
-- Reads from multiple shares — including **every** share in the account — with a single loader instance.
+- Reads from multiple shares with a single loader instance.
 - Walks the real `Share → Directory → File` tree: files and sub-directories are listed separately, so recursion is a genuine tree-walk (no blob-name-prefix simulation).
 - Returns every file as an `ai:TextDocument`, based on its extension:
   - Inherently textual files (e.g. `txt`, `md`, `html`, `json`, `csv`, `xml`) are decoded directly.
@@ -135,8 +135,6 @@ An oversized file is reported differently depending on how the loader reached it
 Either way the loader reads at most one byte past the limit: the download is issued as a byte
 range, so an oversized file is identified without ever being held in memory whole.
 
-The loader constructs and owns its connector clients. The connector splits its API across two of them — `files:FileClient` lists directories and downloads files, while `files:ManagementClient` exists only to enumerate the account's shares — so a `files:ManagementClient` is constructed **lazily**, only when some source uses `share: "*"`. A load that names its shares never opens a connection it will not use.
-
 ### The share / directory model
 
 Unlike Azure Blob Storage's flat namespace, an Azure Files share is a real directory tree: a share holds directories, directories hold files and further sub-directories (e.g. `reports/2026/q1.pdf`). This loader maps a configured **path** onto a directory or a file:
@@ -153,14 +151,6 @@ By default a directory loads only the files **directly** inside it. Set `recursi
 
 ```ballerina
 {share: "documents", paths: ["/reports"], recursive: true}
-```
-
-### Reading from every share
-
-Set `share` to `"*"` to read from **every** share in the storage account. Because the `paths` are then applied to all shares, a path that does not exist in a given share is **skipped** for it rather than treated as an error:
-
-```ballerina
-{share: "*", paths: ["/shared"], recursive: true}
 ```
 
 ### Filtering by file type
@@ -190,7 +180,7 @@ Each returned `ai:TextDocument` carries metadata including the file name (`fileN
 
 ## Limitations
 
-- **Single-page listings.** The underlying connector (`azure_storage_service` 4.3.4) does not surface the Azure continuation marker (`NextMarker`) for directory, file, or share listings, so each listing returns a single page of up to 5000 entries. A directory with more than that **fails the load with an error** rather than returning a truncated result — narrow it with `paths` or `includeExtensions`. A directory holding exactly 5000 entries trips the same check. Recursion into sub-directories is unaffected.
+- **Single-page listings.** The underlying connector (`azure_storage_service` 4.3.4) does not surface the Azure continuation marker (`NextMarker`) for directory or file listings, so each listing returns a single page of up to 5000 entries. A directory with more than that **fails the load with an error** rather than returning a truncated result — narrow it with `paths` or `includeExtensions`. A directory holding exactly 5000 entries trips the same check. Recursion into sub-directories is unaffected.
 - **An empty listing costs one extra request to verify.** The connector does not check the
   HTTP status of its listing calls, so an Azure error (a `403` from an expired SAS, a `503`
   while throttled, a share that does not exist) arrives looking exactly like an empty
@@ -257,7 +247,7 @@ The connection configuration is the [`ballerinax/azure_storage_service.files`](h
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `share` | `string` | — | The share name to read from, or `"*"` for every share in the account |
+| `share` | `string` | — | The share name to read from |
 | `paths` | `string[]` | `["/"]` | Directory paths and/or explicit file names. The default `["/"]` loads the whole share; `[]` loads nothing |
 | `recursive` | `boolean` | `false` | Whether directories are traversed into sub-directories |
 | `includeExtensions` | `string[]?` | absent | Extension allowlist applied to directory contents (e.g. `["pdf"]`). Case-insensitive; when absent, all types are loaded. Explicit file paths bypass it |

@@ -31,19 +31,6 @@ isolated function newFileClient(files:ConnectionConfig config) returns files:Fil
     return fileClient;
 }
 
-// Constructs the Azure Files `ManagementClient` (used only to enumerate shares for a
-// `share: "*"` source via `listShares`), wrapping any construction failure as an `ai:Error`.
-isolated function newManagementClient(files:ConnectionConfig config) returns files:ManagementClient|ai:Error {
-    files:ManagementClient|error managementClient = new (config);
-    if managementClient is error {
-        return error ai:Error(
-            string `Failed to initialize the Azure Files management client: ` +
-                string `${redactSecrets(managementClient.message())}`,
-            managementClient);
-    }
-    return managementClient;
-}
-
 // Reports whether a connector error denotes a missing resource (share, directory, or file).
 // The `files` connector maps every HTTP 404 — regardless of the Azure error code
 // (`ShareNotFound`, `ResourceNotFound`, `ParentNotFound`, …) — to a distinct

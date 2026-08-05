@@ -117,39 +117,14 @@ isolated function testDirectoryNamesSingle() {
     test:assertEquals(directoryNames(directoryList), ["archive"]);
 }
 
-// ---- shareNames (single-or-array) --------------------------------------------
-
-@test:Config {}
-isolated function testShareNamesArray() {
-    files:SharesList sharesList = {
-        Shares: {
-            Share: [
-                {Name: "documents", Properties: {'Last\-Modified: "d", Quota: "5120"}},
-                {Name: "reports", Properties: {'Last\-Modified: "d", Quota: "5120"}}
-            ]
-        }
-    };
-    test:assertEquals(shareNames(sharesList), ["documents", "reports"]);
-}
-
-@test:Config {}
-isolated function testShareNamesSingle() {
-    files:SharesList sharesList = {
-        Shares: {Share: {Name: "documents", Properties: {'Last\-Modified: "d", Quota: "5120"}}}
-    };
-    test:assertEquals(shareNames(sharesList), ["documents"]);
-}
-
 // ---- isEmptyListing (connector "No ... found" sentinels) ---------------------
 
 @test:Config {}
 isolated function testIsEmptyListingSentinels() {
     files:ProcessingError noFiles = error("No files found in received azure response. Path= /s/d");
     files:ProcessingError noDirs = error("No directories found in received azure response Path= /s/d");
-    files:ProcessingError noShares = error("No any shares found in storage accountAccount = acct");
     test:assertTrue(isEmptyListing(noFiles), "empty file listing is recognised");
     test:assertTrue(isEmptyListing(noDirs), "empty directory listing is recognised");
-    test:assertTrue(isEmptyListing(noShares), "empty share listing is recognised");
 }
 
 @test:Config {}
@@ -179,17 +154,6 @@ isolated function testInitConstructsForNamedShare() returns error? {
         authorizationMethod: files:SAS
     };
     TextDataLoader _ = check new (config, [{share: "documents", paths: ["/reports"], recursive: true}]);
-}
-
-@test:Config {}
-isolated function testInitConstructsForWildcardShare() returns error? {
-    // A `"*"` source also builds the management client (share enumeration); still offline at init.
-    files:ConnectionConfig config = {
-        accountName: "contosostorage",
-        accessKeyOrSAS: "dGhpcy1pcy1hLWZha2Uta2V5LWZvci10ZXN0aW5n",
-        authorizationMethod: files:ACCESS_KEY
-    };
-    TextDataLoader _ = check new (config, [{share: "*"}]);
 }
 
 @test:Config {}

@@ -40,13 +40,6 @@ isolated function testSourceExplicitValues() {
     test:assertEquals(src?.includeExtensions, ["pdf", ".md"]);
 }
 
-@test:Config {}
-isolated function testSourceWildcardShare() {
-    Source src = {share: "*"};
-    test:assertEquals(src.share, "*", "'*' selects every share in the account");
-    test:assertEquals(src.paths, ["/"], "wildcard share still defaults to the whole tree");
-}
-
 // ---- FileEntry shape ---------------------------------------------------------
 
 @test:Config {}
