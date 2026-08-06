@@ -117,39 +117,14 @@ isolated function testDirectoryNamesSingle() {
     test:assertEquals(directoryNames(directoryList), ["archive"]);
 }
 
-// ---- shareNames (single-or-array) --------------------------------------------
-
-@test:Config {}
-isolated function testShareNamesArray() {
-    files:SharesList sharesList = {
-        Shares: {
-            Share: [
-                {Name: "documents", Properties: {'Last\-Modified: "d", Quota: "5120"}},
-                {Name: "reports", Properties: {'Last\-Modified: "d", Quota: "5120"}}
-            ]
-        }
-    };
-    test:assertEquals(shareNames(sharesList), ["documents", "reports"]);
-}
-
-@test:Config {}
-isolated function testShareNamesSingle() {
-    files:SharesList sharesList = {
-        Shares: {Share: {Name: "documents", Properties: {'Last\-Modified: "d", Quota: "5120"}}}
-    };
-    test:assertEquals(shareNames(sharesList), ["documents"]);
-}
-
 // ---- isEmptyListing (connector "No ... found" sentinels) ---------------------
 
 @test:Config {}
 isolated function testIsEmptyListingSentinels() {
     files:ProcessingError noFiles = error("No files found in received azure response. Path= /s/d");
     files:ProcessingError noDirs = error("No directories found in received azure response Path= /s/d");
-    files:ProcessingError noShares = error("No any shares found in storage accountAccount = acct");
     test:assertTrue(isEmptyListing(noFiles), "empty file listing is recognised");
     test:assertTrue(isEmptyListing(noDirs), "empty directory listing is recognised");
-    test:assertTrue(isEmptyListing(noShares), "empty share listing is recognised");
 }
 
 @test:Config {}
@@ -182,14 +157,34 @@ isolated function testInitConstructsForNamedShare() returns error? {
 }
 
 @test:Config {}
-isolated function testInitConstructsForWildcardShare() returns error? {
-    // A `"*"` source also builds the management client (share enumeration); still offline at init.
+isolated function testInitRejectsNonPositiveMaxFileSize() {
+    // A zero or negative bound would silently skip every file, so it is rejected at init.
+    // Both sides of the boundary are asserted: a check weakened from `<= 0` to `< 0` would
+    // still let zero through, and zero is the value a mis-typed configuration actually
+    // produces.
+    files:ConnectionConfig config = {accountName: "acct", accessKeyOrSAS: "token", authorizationMethod: files:SAS};
+    TextDataLoader|error zero = new (config, [{share: "documents"}], 0);
+    test:assertTrue(zero is error, "'maxFileSizeInBytes' of 0 must be rejected");
+    TextDataLoader|error negative = new (config, [{share: "documents"}], -1);
+    test:assertTrue(negative is error, "a negative 'maxFileSizeInBytes' must be rejected");
+    if negative is ai:Error {
+        test:assertTrue(negative.message().includes("positive"), negative.message());
+    }
+}
+
+@test:Config {}
+isolated function testInitAcceptsCustomMaxFileSize() returns error? {
+    // Construction only. What the stored limit *does* — the range the download asks for and
+    // the skip/error split once it comes back — is covered by the bounded-download tests
+    // below and, end to end, by the live sample: the connector derives its endpoint from the
+    // account name (`https://<account>.file.core.windows.net`), so no local stub can stand in
+    // for Azure here.
     files:ConnectionConfig config = {
         accountName: "contosostorage",
-        accessKeyOrSAS: "dGhpcy1pcy1hLWZha2Uta2V5LWZvci10ZXN0aW5n",
-        authorizationMethod: files:ACCESS_KEY
+        accessKeyOrSAS: "sv=2022-11-02&ss=f&srt=co&sp=rl&sig=abc",
+        authorizationMethod: files:SAS
     };
-    TextDataLoader _ = check new (config, [{share: "*"}]);
+    TextDataLoader _ = check new (config, [{share: "documents"}], 1024);
 }
 
 @test:Config {}
@@ -274,4 +269,52 @@ isolated function testAzureErrorCodeNilForNonServerErrors() {
     // A ProcessingError carries no Azure detail record, so there is no code to read.
     test:assertTrue(azureErrorCode(error files:ProcessingError("No files found")) is ());
     test:assertTrue(azureErrorCode(error("something else")) is ());
+}
+
+// ---- the bound imposed on every download -------------------------------------
+
+@test:Config {}
+isolated function testBoundedRangeAsksForOneByteBeyondTheLimit() {
+    // The single extra byte is the whole mechanism: `bytes=0-limit` yields `limit + 1` bytes
+    // only when the file has more to give, so an oversized file is recognised from the length
+    // of the response without reading any further into it. A range ending *at* `limit - 1`
+    // would make a file of exactly `limit` bytes indistinguishable from a 4 TiB one.
+    files:ContentRange range = boundedRange(1024);
+    test:assertEquals(range.startByte, 0, "the range must start at the first byte");
+    test:assertEquals(range.endByte, 1024, "the range must end one byte past the limit");
+    test:assertEquals(range.endByte - range.startByte + 1, 1025,
+            "1024 permitted bytes, plus the one byte that proves there are more");
+    test:assertEquals(boundedRange(104857600).endByte, 104857600, "the default limit is bounded the same way");
+}
+
+@test:Config {}
+isolated function testIsInvalidRangeErrorRecognisesTheEmptyFileRejection() {
+    // A zero-length file has no byte 0, so Azure answers the bounded request with 416
+    // `InvalidRange`. That is the loader's cue to re-read the file without a range rather
+    // than report the load as failed.
+    files:ServerError invalidRange = error files:ServerError("Undefined error occured",
+            httpStatus = STATUS_RANGE_NOT_SATISFIABLE, errorCode = INVALID_RANGE_CODE,
+            message = "The range specified is invalid for the current size of the resource.");
+    test:assertTrue(isInvalidRangeError(invalidRange), "a 416 InvalidRange marks an empty file");
+
+    // A 416 whose XML body the connector could not parse arrives as a generic `ServerError`
+    // carrying `errorCode = "Undefined"`, so the status alone has to carry the decision.
+    files:ServerError undefined = error files:ServerError("Undefined error occured",
+            httpStatus = STATUS_RANGE_NOT_SATISFIABLE, errorCode = "Undefined", message = "Unknown");
+    test:assertTrue(isInvalidRangeError(undefined), "an unparsed 416 is still a range rejection");
+}
+
+@test:Config {}
+isolated function testIsInvalidRangeErrorRejectsOtherFailures() {
+    // Every other failure keeps its own handling. Widening this predicate would retry a
+    // missing file or a rejected credential as an *unbounded* download, which is precisely
+    // what the range exists to prevent.
+    files:NotFoundError notFound = error files:NotFoundError("Resource not found.",
+            httpStatus = 404, errorCode = RESOURCE_NOT_FOUND_CODE, message = "not found");
+    test:assertFalse(isInvalidRangeError(notFound), "a 404 is a missing file, not an empty one");
+    files:ForbiddenError forbidden = error files:ForbiddenError("Forbidden. ",
+            httpStatus = 403, errorCode = "AuthenticationFailed", message = "denied");
+    test:assertFalse(isInvalidRangeError(forbidden), "a 403 must surface as an authorization failure");
+    test:assertFalse(isInvalidRangeError(error files:ProcessingError("No files found")));
+    test:assertFalse(isInvalidRangeError(error("some transport failure")));
 }

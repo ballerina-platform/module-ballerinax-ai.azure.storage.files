@@ -40,13 +40,6 @@ isolated function testSourceExplicitValues() {
     test:assertEquals(src?.includeExtensions, ["pdf", ".md"]);
 }
 
-@test:Config {}
-isolated function testSourceWildcardShare() {
-    Source src = {share: "*"};
-    test:assertEquals(src.share, "*", "'*' selects every share in the account");
-    test:assertEquals(src.paths, ["/"], "wildcard share still defaults to the whole tree");
-}
-
 // ---- FileEntry shape ---------------------------------------------------------
 
 @test:Config {}
@@ -62,18 +55,4 @@ isolated function testFileEntryAtShareRoot() {
     FileEntry entry = {name: "readme.txt", directoryPath: "", contentLength: 42};
     test:assertEquals(entry.directoryPath, "", "A file at the share root has an empty directoryPath");
     test:assertEquals(entry.contentLength, 42);
-}
-
-@test:Config {}
-isolated function testSourceMaxFileSizeDefault() {
-    // Every file is buffered whole in memory before extraction, so the default bound is what
-    // stops one oversized file in a share from exhausting the heap.
-    Source src = {share: "documents"};
-    test:assertEquals(src.maxFileSizeInBytes, 104857600, "Defaults to 100 MiB");
-}
-
-@test:Config {}
-isolated function testSourceMaxFileSizeIsConfigurable() {
-    Source src = {share: "documents", maxFileSizeInBytes: 1024};
-    test:assertEquals(src.maxFileSizeInBytes, 1024);
 }

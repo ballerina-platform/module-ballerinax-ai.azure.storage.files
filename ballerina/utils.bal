@@ -187,7 +187,7 @@ isolated function matchesExtensionFilter(string fileName, string[]? includeExten
     return false;
 }
 
-// The page size requested for every directory, file and share listing.
+// The page size requested for every directory and file listing.
 //
 // Azure caps a single `List Directories and Files` page at 5,000 entries and will not return
 // more however large a `maxresults` is asked for. Requesting it explicitly is what makes
@@ -246,23 +246,6 @@ isolated function toUtc(string? dateTime) returns time:Utc? {
     }
     time:Utc|error utc = time:utcFromString(dateTime);
     return utc is time:Utc ? utc : ();
-}
-
-// Removes duplicate strings, preserving first-appearance order. Applied to share names as
-// a safety net only: `listShares` returns a single, un-paginated page and Azure share names
-// are unique within an account, so this is not expected to remove anything today. It guards
-// the day the connector grows a continuation marker and the loader starts concatenating
-// pages (see `resolveShares`).
-isolated function dedupeStrings(string[] values) returns string[] {
-    string[] result = [];
-    map<boolean> seen = {};
-    foreach string value in values {
-        if !seen.hasKey(value) {
-            seen[value] = true;
-            result.push(value);
-        }
-    }
-    return result;
 }
 
 // MIME types (outside the `text/` family) treated as text.

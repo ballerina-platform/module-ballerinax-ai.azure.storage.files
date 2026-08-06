@@ -26,33 +26,36 @@ public isolated class TextDataLoader {
     *ai:DataLoader;
 
     private final files:FileClient fileClient;
-    // Only constructed when a source uses `share: "*"` (share enumeration); `()` otherwise.
-    private final files:ManagementClient? managementClient;
     private final readonly & Source[] sources;
+    private final int maxFileSizeInBytes;
 
     # Initializes the Azure Files data loader.
     #
     # + azureConnection - The authentication and service configuration shared by all sources
     # + sources - One or more Azure Files shares to load documents from
+    # + maxFileSizeInBytes - The largest file, in bytes, that will be downloaded and converted;
+    #                        since every file is read fully into memory and Azure Files allows
+    #                        files up to 4 TiB, this bound keeps one oversized file from
+    #                        exhausting the heap. Defaults to 100 MiB. A file found while listing
+    #                        a directory that exceeds this is skipped with a warning, while a
+    #                        file named explicitly in `paths` is rejected with an error instead;
+    #                        either way, at most one byte past the limit is ever read.
     # + return - An `ai:Error` if the loader could not be initialized
     public isolated function init(
             @display {label: "Azure Connection"} files:ConnectionConfig azureConnection,
-            @display {label: "Data Sources"} Source[] sources) returns ai:Error? {
+            @display {label: "Data Sources"} Source[] sources,
+            @display {label: "Maximum File Size (Bytes)"} int maxFileSizeInBytes = 104857600)
+            returns ai:Error? {
         if sources.length() == 0 {
             return error ai:Error("At least one source must be provided to the Azure Files data loader");
         }
-        self.sources = sources.cloneReadOnly();
-        // The management client is only needed to enumerate shares for a `"*"` source, so it
-        // is built lazily: a load that names its shares never opens a connection it will not use.
-        boolean needsManagement = false;
-        foreach Source src in sources {
-            if src.share == "*" {
-                needsManagement = true;
-                break;
-            }
+        if maxFileSizeInBytes <= 0 {
+            return error ai:Error(string `'maxFileSizeInBytes' must be a positive number of bytes, ` +
+                string `but found ${maxFileSizeInBytes}`);
         }
+        self.sources = sources.cloneReadOnly();
+        self.maxFileSizeInBytes = maxFileSizeInBytes;
         self.fileClient = check newFileClient(azureConnection);
-        self.managementClient = needsManagement ? check newManagementClient(azureConnection) : ();
     }
 
     # Loads the configured Azure Files documents.
@@ -62,15 +65,9 @@ public isolated class TextDataLoader {
     public isolated function load() returns ai:Document[]|ai:Document|ai:Error {
         ai:Document[] documents = [];
         foreach Source src in self.sources {
-            string[] shares = check self.resolveShares(src.share);
-            // A `"*"` share applies the paths to every share, where a path need not exist in
-            // all of them, so a missing path is tolerated (skipped) rather than an error.
-            boolean tolerateMissing = src.share == "*";
-            foreach string share in shares {
-                foreach string rawPath in src.paths {
-                    ai:Document[] loaded = check self.loadPath(share, rawPath, src, tolerateMissing);
-                    documents.push(...loaded);
-                }
+            foreach string rawPath in src.paths {
+                ai:Document[] loaded = check self.loadPath(src.share, rawPath, src);
+                documents.push(...loaded);
             }
         }
         if documents.length() == 1 {
@@ -79,58 +76,29 @@ public isolated class TextDataLoader {
         return documents;
     }
 
-    // Resolves the shares to read from: the single named share, or every share in the
-    // account when `"*"`. Azure Files' `listShares` returns all shares in one response
-    // (the connector does not surface a continuation marker), so no pagination loop is
-    // possible here; an account with no shares yields an empty list rather than an error.
-    private isolated function resolveShares(string share) returns string[]|ai:Error {
-        if share != "*" {
-            return [share];
-        }
-        files:ManagementClient? managementClient = self.managementClient;
-        if managementClient is () {
-            // Unreachable: `init` builds the management client from the configuration whenever
-            // any source uses `"*"`, and a source's share cannot change after construction.
-            return error ai:Error("The management client required for a '*' share was not initialized");
-        }
-        files:SharesList|files:Error result = managementClient->listShares(
-                {maxresults: LISTING_PAGE_SIZE.toString()});
-        if result is files:SharesList {
-            string[] names = dedupeStrings(shareNames(result));
-            check checkListingComplete(names.length(), "shares", "/", share);
-            return names;
-        }
-        if isEmptyListing(result) {
-            return [];
-        }
-        return error ai:Error(
-            string `Failed to list shares in the storage account: ${redactSecrets(result.message())}`, result);
-    }
-
     // Loads a single configured path within a share. The share root (`"/"`/`""`) or a
     // trailing-`/` path is a directory listing. Otherwise the path is first probed as an
     // explicitly named file; if no such file exists it is treated as a directory, unless it
     // looks like a file (has an extension), in which case a missing file is an error (typo
-    // detection) — except under `tolerateMissing` (the `"*"` case), where it is skipped.
-    private isolated function loadPath(string share, string rawPath, Source src, boolean tolerateMissing)
-            returns ai:Document[]|ai:Error {
+    // detection).
+    private isolated function loadPath(string share, string rawPath, Source src) returns ai:Document[]|ai:Error {
         string normalized = normalizePath(rawPath);
         if normalized == "" || normalized.endsWith("/") {
-            return self.listDirectory(share, trimTrailingSlash(normalized), src, tolerateMissing);
+            return self.listDirectory(share, trimTrailingSlash(normalized), src, false);
         }
 
         // Ambiguous file-or-directory path: probe for an exact file first.
         [string, string] [directoryPath, fileName] = splitPath(normalized);
-        byte[]|files:Error content = self.fileClient->getFileAsByteArray(share, fileName,
+        byte[]|files:Error content = self.downloadBounded(share, fileName,
                 directoryPath == "" ? () : directoryPath);
         if content is byte[] {
-            // The size of a path named directly is not known until it has been fetched: the
+            // The size of a path named directly is not known until it has been read: the
             // connector exposes no properties/HEAD call, so unlike a listed file this one can
-            // only be rejected after the download. The limit still bounds extraction.
-            if content.length() > src.maxFileSizeInBytes {
-                return error ai:Error(string `File '${rawPath}' in share '${share}' is ` +
-                    string `${content.length()} bytes, which exceeds the configured ` +
-                    string `'maxFileSizeInBytes' of ${src.maxFileSizeInBytes}`);
+            // only be rejected after the request. The read stops one byte past the limit, so
+            // "longer than the limit" is what a full buffer means here, not what it cost.
+            if content.length() > self.maxFileSizeInBytes {
+                return error ai:Error(string `File '${rawPath}' in share '${share}' exceeds the ` +
+                    string `configured 'maxFileSizeInBytes' of ${self.maxFileSizeInBytes}`);
             }
             // An explicitly named file is always loaded, regardless of the extension filter.
             // A deliberately named non-text file is an error, unlike directory contents.
@@ -153,20 +121,19 @@ public isolated class TextDataLoader {
             if documents.length() > 0 {
                 return documents;
             }
-            if tolerateMissing {
-                return [];
-            }
             return error ai:Error(string `Failed to load path '${rawPath}' from share '${share}': ` +
                 string `no file of that name exists, and no directory of that name holds loadable files`);
         }
-        return self.listDirectory(share, normalized, src, tolerateMissing);
+        return self.listDirectory(share, normalized, src, false);
     }
 
     // Lists a directory: converts its files into documents and, when `recursive`, descends
     // into each sub-directory. Files and sub-directories come from separate connector calls
     // (`getFileList` / `getDirectoryList`), so — unlike the flat-namespace Blob loader — no
     // direct-child filtering is needed; a non-recursive load is simply this directory's files.
-    // An empty directory is not an error; a missing directory is tolerated only under `"*"`.
+    // An empty directory is not an error; a missing one is tolerated only when `loadPath` is
+    // probing whether an extension-looking path is actually a directory — everywhere else a
+    // missing directory is an error (typo detection).
     private isolated function listDirectory(string share, string directoryPath, Source src,
             boolean tolerateMissing) returns ai:Document[]|ai:Error {
         FileEntry[] entries = check self.listFiles(share, directoryPath, tolerateMissing);
@@ -176,13 +143,13 @@ public isolated class TextDataLoader {
             if !matchesExtensionFilter(entry.name, src?.includeExtensions) {
                 continue;
             }
-            // The listing reports each file's size, so an oversized file is rejected before
-            // it is fetched — the whole body is otherwise held in memory at once.
+            // When the listing reports a size over the limit, the file is dropped without a
+            // request at all — the cheapest of the two rejections, and the common one.
             int? contentLength = entry.contentLength;
-            if contentLength is int && contentLength > src.maxFileSizeInBytes {
+            if contentLength is int && contentLength > self.maxFileSizeInBytes {
                 log:printWarn("Skipping an Azure Files file larger than 'maxFileSizeInBytes'",
                         fileName = entry.name, directory = directoryPath, share = share,
-                        fileSize = contentLength, maxFileSizeInBytes = src.maxFileSizeInBytes);
+                        fileSize = contentLength, maxFileSizeInBytes = self.maxFileSizeInBytes);
                 continue;
             }
 
@@ -192,6 +159,19 @@ public isolated class TextDataLoader {
                 // vanished file), not a property of the content, so it aborts the walk
                 // rather than quietly shrinking the result set.
                 return content;
+            }
+            // A listing's size is a claim, not a measurement: `Content-Length` is optional in
+            // the response, and an SMB or NFS client can grow a file without the listing
+            // catching up. So the limit is applied again to what actually arrived — otherwise
+            // a missing or under-reported size would walk an arbitrarily large file straight
+            // past the check above. `downloadBounded` stops one byte beyond the limit, so a
+            // buffer longer than it means the file is larger, and nothing more was read.
+            if content.length() > self.maxFileSizeInBytes {
+                log:printWarn("Skipping an Azure Files file larger than 'maxFileSizeInBytes'; " +
+                        "its listed size was missing or understated the file",
+                        fileName = entry.name, directory = directoryPath, share = share,
+                        listedFileSize = contentLength, maxFileSizeInBytes = self.maxFileSizeInBytes);
+                continue;
             }
             ai:TextDocument?|ai:Error document = buildDocument(content, entry.name, (),
                     <decimal>(entry.contentLength ?: content.length()), (), ());
@@ -215,9 +195,9 @@ public isolated class TextDataLoader {
         }
 
         if src.recursive {
-            foreach string subDirectory in check self.listSubDirectories(share, directoryPath, tolerateMissing) {
+            foreach string subDirectory in check self.listSubDirectories(share, directoryPath) {
                 string childPath = directoryPath == "" ? subDirectory : (directoryPath + "/" + subDirectory);
-                ai:Document[] childDocuments = check self.listDirectory(share, childPath, src, tolerateMissing);
+                ai:Document[] childDocuments = check self.listDirectory(share, childPath, src, false);
                 documents.push(...childDocuments);
             }
         }
@@ -226,7 +206,8 @@ public isolated class TextDataLoader {
 
     // Lists a directory's files as normalized `FileEntry` values. An empty directory (the
     // connector's "No files found" sentinel) yields no entries; a missing directory (404) is
-    // tolerated only under a `"*"` source, otherwise it is an error (typo detection).
+    // tolerated only while `loadPath` is probing whether an extension-looking path is a
+    // directory, otherwise it is an error (typo detection).
     private isolated function listFiles(string share, string directoryPath, boolean tolerateMissing)
             returns FileEntry[]|ai:Error {
         string? directoryArg = directoryPath == "" ? () : directoryPath;
@@ -307,7 +288,7 @@ public isolated class TextDataLoader {
     // Returns the names of a directory's immediate sub-directories. An empty or missing
     // directory yields no sub-directories rather than an error (the parent's files were
     // already listed; a genuine failure still surfaces).
-    private isolated function listSubDirectories(string share, string directoryPath, boolean tolerateMissing)
+    private isolated function listSubDirectories(string share, string directoryPath)
             returns string[]|ai:Error {
         string? directoryArg = directoryPath == "" ? () : directoryPath;
         files:DirectoryList|files:Error directoryList = self.fileClient->getDirectoryList(share, directoryArg,
@@ -330,12 +311,38 @@ public isolated class TextDataLoader {
     // the caller can tell a transport failure (which must abort the walk) from content that
     // simply cannot be turned into text (which is skipped).
     private isolated function downloadFile(string share, FileEntry entry) returns byte[]|ai:Error {
-        byte[]|files:Error content = self.fileClient->getFileAsByteArray(share, entry.name,
+        byte[]|files:Error content = self.downloadBounded(share, entry.name,
                 entry.directoryPath == "" ? () : entry.directoryPath);
         if content is files:Error {
             return error ai:Error(string `Failed to download file '${entry.name}' from directory ` +
                 string `'${entry.directoryPath}' of share '${share}': ` +
                 string `${redactSecrets(content.message())}`, content);
+        }
+        return content;
+    }
+
+    // Reads a file, never taking in more than one byte beyond `maxFileSizeInBytes`.
+    //
+    // Azure's `Get File` honours a byte range and the connector passes one through, so the
+    // limit can be imposed on the wire rather than on a body already buffered: asking for
+    // `bytes=0-limit` returns the whole file when it fits, and exactly `limit + 1` bytes when
+    // it does not. That single extra byte is what tells the two apart, and it is the entire
+    // cost of discovering a 4 TiB file. The bound therefore holds without trusting any
+    // reported size — the listing's `Content-Length` is optional and can be stale, and a path
+    // named in `paths` has no listing behind it at all.
+    //
+    // Errors are returned as the connector's own `files:Error`, since callers still need to
+    // tell a missing file from a transport failure.
+    private isolated function downloadBounded(string share, string fileName, string? directoryPath)
+            returns byte[]|files:Error {
+        byte[]|files:Error content = self.fileClient->getFileAsByteArray(share, fileName, directoryPath,
+                boundedRange(self.maxFileSizeInBytes));
+        if content is files:Error && isInvalidRangeError(content) {
+            // An empty file has no byte 0 for the range to start at, so Azure rejects the
+            // request outright. It is the one file that has to be fetched unbounded — and the
+            // only one for which that is free, because the rejection itself proves it holds
+            // nothing.
+            return self.fileClient->getFileAsByteArray(share, fileName, directoryPath);
         }
         return content;
     }
@@ -409,23 +416,14 @@ isolated function directoryNames(files:DirectoryList directoryList) returns stri
     return directoryArray.'map(isolated function(files:Directory d) returns string => d.Name);
 }
 
-// Extracts the share names from a connector `SharesList`, normalizing its single-or-array
-// `Share` field to an array.
-isolated function shareNames(files:SharesList sharesList) returns string[] {
-    files:ShareItem[]|files:ShareItem share = sharesList.Shares.Share;
-    files:ShareItem[] shareArray = share is files:ShareItem[] ? share : [share];
-    return shareArray.'map(isolated function(files:ShareItem s) returns string => s.Name);
-}
-
 // Reports whether a connector error is the "empty listing" sentinel. The `files` connector
-// signals an empty share/directory/account listing by returning a `ProcessingError` whose
-// message is one of `NO_FILE_FOUND` / `NO_DIRECTORIES_FOUND` / `NO_SHARES_FOUND` (rather than
-// an empty result), so the loader treats these as "nothing here", not a failure.
+// signals an empty directory listing by returning a `ProcessingError` whose message is one of
+// `NO_FILE_FOUND` / `NO_DIRECTORIES_FOUND` (rather than an empty result), so the loader treats
+// these as "nothing here", not a failure.
 isolated function isEmptyListing(error err) returns boolean {
     if err !is files:ProcessingError {
         return false;
     }
     string message = err.message();
-    return message.includes("No files found") || message.includes("No directories found")
-            || message.includes("No any shares found");
+    return message.includes("No files found") || message.includes("No directories found");
 }

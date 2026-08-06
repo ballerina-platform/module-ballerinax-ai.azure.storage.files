@@ -46,18 +46,6 @@ isolated function testNewFileClientWithAccessKey() returns error? {
     files:FileClient _ = check newFileClient(config);
 }
 
-// ---- newManagementClient construction (used for share: "*") -----------------
-
-@test:Config {}
-isolated function testNewManagementClientWithSas() returns error? {
-    files:ConnectionConfig config = {
-        accountName: "contosostorage",
-        accessKeyOrSAS: "sv=2022-11-02&ss=f&srt=s&sp=l&sig=abc",
-        authorizationMethod: files:SAS
-    };
-    files:ManagementClient _ = check newManagementClient(config);
-}
-
 // ---- isNotFoundError ---------------------------------------------------------
 
 @test:Config {}

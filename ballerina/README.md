@@ -10,7 +10,7 @@ The acquisition layer — authentication, directory/file listing, and download �
 
 - Reads files from one or more Azure Files **shares** in a storage account.
 - Loads individual files as well as entire **directories**, optionally recursively.
-- Reads from multiple shares — including **every** share in the account — with a single loader instance.
+- Reads from multiple shares with a single loader instance.
 - Walks the real `Share → Directory → File` tree: files and sub-directories are listed separately, so recursion is a genuine tree-walk (no blob-name-prefix simulation).
 - Returns every file as an `ai:TextDocument`, based on its extension:
   - Inherently textual files (e.g. `txt`, `md`, `html`, `json`, `csv`, `xml`) are decoded directly.
@@ -106,7 +106,34 @@ final azureFiles:TextDataLoader loader = check new (
 );
 ```
 
-The loader constructs and owns its connector clients. The connector splits its API across two of them — `files:FileClient` lists directories and downloads files, while `files:ManagementClient` exists only to enumerate the account's shares — so a `files:ManagementClient` is constructed **lazily**, only when some source uses `share: "*"`. A load that names its shares never opens a connection it will not use.
+A third, optional parameter — `maxFileSizeInBytes` — bounds how large a file may be before the
+loader will convert it. It applies to every source and defaults to 100 MiB:
+
+```ballerina
+final files:ConnectionConfig connectionConfig = {
+    accountName,
+    accessKeyOrSAS,
+    authorizationMethod: files:SAS
+};
+
+final azureFiles:TextDataLoader smallFilesOnly = check new (
+    connectionConfig,
+    [{share: "documents", recursive: true}],
+    10 * 1024 * 1024
+);
+```
+
+An oversized file is reported differently depending on how the loader reached it:
+
+- **Found by listing a directory** — skipped with a `WARN`, so one huge file cannot fail a bulk
+  ingestion run. When the listing reports a size over the limit the file is never requested at
+  all; when the listing reports no size (the property is optional) or understates it, the read
+  itself is cut short and the file is skipped then.
+- **Named explicitly in `paths`** — an **error**, since it was asked for by name. Such a path
+  has no listing to consult, so it is read before being rejected.
+
+Either way the loader reads at most one byte past the limit: the download is issued as a byte
+range, so an oversized file is identified without ever being held in memory whole.
 
 ### The share / directory model
 
@@ -124,14 +151,6 @@ By default a directory loads only the files **directly** inside it. Set `recursi
 
 ```ballerina
 {share: "documents", paths: ["/reports"], recursive: true}
-```
-
-### Reading from every share
-
-Set `share` to `"*"` to read from **every** share in the storage account. Because the `paths` are then applied to all shares, a path that does not exist in a given share is **skipped** for it rather than treated as an error:
-
-```ballerina
-{share: "*", paths: ["/shared"], recursive: true}
 ```
 
 ### Filtering by file type
@@ -161,7 +180,7 @@ Each returned `ai:TextDocument` carries metadata including the file name (`fileN
 
 ## Limitations
 
-- **Single-page listings.** The underlying connector (`azure_storage_service` 4.3.4) does not surface the Azure continuation marker (`NextMarker`) for directory, file, or share listings, so each listing returns a single page of up to 5000 entries. A directory with more than that **fails the load with an error** rather than returning a truncated result — narrow it with `paths` or `includeExtensions`. A directory holding exactly 5000 entries trips the same check. Recursion into sub-directories is unaffected.
+- **Single-page listings.** The underlying connector (`azure_storage_service` 4.3.4) does not surface the Azure continuation marker (`NextMarker`) for directory or file listings, so each listing returns a single page of up to 5000 entries. A directory with more than that **fails the load with an error** rather than returning a truncated result — narrow it with `paths` or `includeExtensions`. A directory holding exactly 5000 entries trips the same check. Recursion into sub-directories is unaffected.
 - **An empty listing costs one extra request to verify.** The connector does not check the
   HTTP status of its listing calls, so an Azure error (a `403` from an expired SAS, a `503`
   while throttled, a share that does not exist) arrives looking exactly like an empty
@@ -169,8 +188,10 @@ Each returned `ai:TextDocument` carries metadata including the file name (`fileN
   `Get File` probe — which *does* report status — and turns a rejected request into an error
   instead of an empty result. The cost is one additional request per empty directory.
 - **No content type from listings.** As noted above, classification is extension-based.
-- **A file larger than `maxFileSizeInBytes` is skipped.** Files are buffered whole in memory
-  before extraction, so the default 100 MiB bound protects the process. Raise it deliberately.
+- **A file larger than `maxFileSizeInBytes` is not converted.** Files are buffered whole in
+  memory before extraction, so the default 100 MiB bound protects the process. Raise it
+  deliberately. A file discovered in a directory listing is skipped with a `WARN`; one named
+  explicitly in `paths` is reported as an error.
 - **Text extraction failures are skipped, not fatal.** A password-protected, corrupt, or
   mislabeled file inside a directory listing is logged at `WARN` and skipped so that one bad
   file cannot abort a bulk ingestion run. A path named explicitly in `paths` still errors.
@@ -226,8 +247,15 @@ The connection configuration is the [`ballerinax/azure_storage_service.files`](h
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `share` | `string` | — | The share name to read from, or `"*"` for every share in the account |
+| `share` | `string` | — | The share name to read from |
 | `paths` | `string[]` | `["/"]` | Directory paths and/or explicit file names. The default `["/"]` loads the whole share; `[]` loads nothing |
 | `recursive` | `boolean` | `false` | Whether directories are traversed into sub-directories |
 | `includeExtensions` | `string[]?` | absent | Extension allowlist applied to directory contents (e.g. `["pdf"]`). Case-insensitive; when absent, all types are loaded. Explicit file paths bypass it |
-| `maxFileSizeInBytes` | `int` | `104857600` (100 MiB) | Largest file that will be downloaded and converted. A listed file whose reported size exceeds this is skipped with a warning before it is fetched |
+
+### `TextDataLoader` initialization parameters
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `azureConnection` | `files:ConnectionConfig` | — | The authentication and service configuration shared by all sources |
+| `sources` | `Source[]` | — | One or more Azure Files shares to load documents from; at least one is required |
+| `maxFileSizeInBytes` | `int` | `104857600` (100 MiB) | Largest file that will be converted, applied across every source. A file found in a directory listing is skipped with a warning — before it is fetched when the listing reports an oversized `Content-Length`, and after a bounded read when that size is absent or understated. A file named explicitly in `paths` is read (up to one byte past the limit) and then reported as an error. Must be positive |
