@@ -33,21 +33,13 @@ public isolated class TextDataLoader {
     #
     # + azureConnection - The authentication and service configuration shared by all sources
     # + sources - One or more Azure Files shares to load documents from
-    # + maxFileSizeInBytes - The largest file, in bytes, that will be downloaded and converted.
-    #                        Every file is read fully into memory before its text is extracted,
-    #                        and Azure Files allows files up to 4 TiB, so this bound is what
-    #                        keeps one oversized file in a share from exhausting the heap.
-    #                        Defaults to 100 MiB, comfortably above any document worth
-    #                        embedding.
-    #
-    #                        An oversized file is reported differently depending on how it was
-    #                        reached. A file found by listing a directory is skipped with a
-    #                        warning — before it is fetched at all when the listing reports a
-    #                        size over the limit, and after an attempted read otherwise. A file
-    #                        named explicitly in `paths` is an error instead, since it was asked
-    #                        for by name; it is read before being rejected, because a named path
-    #                        has no listing to consult. Neither case reads more than one byte
-    #                        past the limit: the download itself is bounded by a byte range.
+    # + maxFileSizeInBytes - The largest file, in bytes, that will be downloaded and converted;
+    #                        since every file is read fully into memory and Azure Files allows
+    #                        files up to 4 TiB, this bound keeps one oversized file from
+    #                        exhausting the heap. Defaults to 100 MiB. A file found while listing
+    #                        a directory that exceeds this is skipped with a warning, while a
+    #                        file named explicitly in `paths` is rejected with an error instead;
+    #                        either way, at most one byte past the limit is ever read.
     # + return - An `ai:Error` if the loader could not be initialized
     public isolated function init(
             @display {label: "Azure Connection"} files:ConnectionConfig azureConnection,
