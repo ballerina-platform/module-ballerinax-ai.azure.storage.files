@@ -35,8 +35,3 @@ dependencies {
     implementation group: 'org.apache.tika', name: 'tika-parser-pdf-module', version: "${tikaVersion}"
     implementation group: 'org.apache.tika', name: 'tika-parser-microsoft-module', version: "${tikaVersion}"
 }
-
-java {
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
-}
