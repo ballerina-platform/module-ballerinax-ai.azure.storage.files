@@ -59,7 +59,7 @@ allprojects {
 
 def moduleVersion = project.version.replace("-SNAPSHOT", "")
 
-task build {
+tasks.named('build') {
     dependsOn(':ai.azure.storage.files-native:build')
     dependsOn(':ai.azure.storage.files-ballerina:build')
 }
